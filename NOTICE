@@ -1,0 +1,12 @@
+The Irisbeat provider is Copyright 2026 Webriot and licensed AGPL-3.0-only.
+
+Go dependencies retain their own copyright and license notices in their
+module sources at the versions recorded in go.mod and go.sum.
+
+Terraform Plugin Framework v1.19.0
+Mozilla Public License 2.0
+https://github.com/hashicorp/terraform-plugin-framework/blob/v1.19.0/LICENSE
+
+WHATWG URL parser v0.6.2
+Apache License 2.0
+https://github.com/nlnwa/whatwg-url/blob/v0.6.2/LICENSE
