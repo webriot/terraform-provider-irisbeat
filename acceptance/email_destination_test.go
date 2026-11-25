@@ -215,6 +215,7 @@ resource "irisbeat_notification_destination" "original" {
 	if out := w.run(1, "plan", "-detailed-exitcode", noColor); !strings.Contains(out, "Invalid Irisbeat webhook URL") {
 		t.Fatal("expected planning to reject the missing webhook URL")
 	}
+	assertComputedChannelChangeBlocked(t, w, "original", "webhook", "webhook_url", "Invalid Irisbeat webhook URL", oldRoute)
 	assertFields(t, w.resourceState(original), map[string]any{"id": oldID, "channel": "email"})
 	assertFields(t, installationRequest(t, http.MethodGet, oldEndpoint, key, "", http.StatusOK),
 		map[string]any{"id": oldID, "channel": "email", "confirmed": true})

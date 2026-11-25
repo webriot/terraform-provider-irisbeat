@@ -165,6 +165,12 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 	if !plan.Channel.Equal(prior.Channel) {
+		// Replacement can delete the old destination before the address is resolved.
+		if address.IsUnknown() || inactive.IsUnknown() {
+			resp.Diagnostics.AddError("Notification channel change requires known addresses",
+				"Resolve webhook_url and email_address before changing the channel. Apply the upstream dependencies separately, then run a fresh plan.")
+			return
+		}
 		resp.Diagnostics.AddWarning("Notification channel requires replacement", "If the CLI stops because the channel changed during apply, run a fresh plan and review the destination replacement before applying it.")
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("channel"))
 		return

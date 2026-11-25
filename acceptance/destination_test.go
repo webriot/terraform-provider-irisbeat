@@ -82,6 +82,12 @@ resource "irisbeat_notification_destination" "test" {
 	installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK)
 	assertAssignment(t, monitorEndpoint, key, id)
 
+	assertComputedChannelChangeBlocked(t, w, "test", "email", "email_address", "Invalid Irisbeat email address", "")
+	assertFields(t, w.resourceState(destinationAddress), map[string]any{"id": id, "channel": "webhook"})
+	assertFields(t, installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK),
+		map[string]any{"id": id, "channel": "webhook", "url": canonical})
+	assertAssignment(t, monitorEndpoint, key, id)
+
 	for _, url := range []string{
 		strings.Replace(original, "https:", "http:", 1),
 		"https://[bad]/acceptance-token",
@@ -135,6 +141,35 @@ resource "irisbeat_notification_destination" "test" {
 	if out := w.run(0, "state", "list"); strings.Contains(out, destinationAddress) {
 		t.Fatal("refresh should remove state for a deleted destination")
 	}
+}
+
+func assertComputedChannelChangeBlocked(t *testing.T, w cliWorkspace, resourceName, channel, attribute, invalidDiagnostic, otherConfig string) {
+	t.Helper()
+	const invalid = "secret-invalid-destination-address"
+	w.config(fmt.Sprintf(`
+resource "terraform_data" "next_address" {
+  input = "selected"
+}
+
+resource "irisbeat_notification_destination" "%s" {
+  channel = %q
+  %s = { selected = %q }[terraform_data.next_address.output]
+}
+`, resourceName, channel, attribute, invalid) + otherConfig)
+	out := w.run(1, "plan", "-detailed-exitcode", "-no-color")
+	detail := strings.Join(strings.Fields(out), " ")
+	if !strings.Contains(detail, "Notification channel change requires known addresses") ||
+		!strings.Contains(detail, "Apply the upstream dependencies separately, then run a fresh plan") ||
+		strings.Contains(out, invalid) || strings.Contains(out, "must be replaced") {
+		t.Fatal("expected a redacted plan error with staging guidance before replacement")
+	}
+
+	w.run(0, "apply", "-auto-approve", "-no-color", "-target=terraform_data.next_address")
+	out = w.run(1, "plan", "-detailed-exitcode", "-no-color")
+	if !strings.Contains(out, invalidDiagnostic) || strings.Contains(out, invalid) || strings.Contains(out, "must be replaced") {
+		t.Fatal("expected planning to reject the resolved invalid address without displaying it")
+	}
+	w.run(0, "state", "rm", "terraform_data.next_address")
 }
 
 func assignedMonitor(t *testing.T, baseURL, key, destinationID string) string {
