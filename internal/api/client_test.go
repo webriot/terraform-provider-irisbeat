@@ -64,7 +64,7 @@ func TestCreateReplaysLostResponse(t *testing.T) {
 func TestCreateRejectsWrongResourceResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, strings.Replace(savedMonitor, `"kind":"http"`, `"kind":"tcp"`, 1))
+		_, _ = io.WriteString(w, strings.Replace(savedMonitor, `"kind":"http","url":"https://example.com/"`, `"kind":"tcp","hostname":"example.com","port":443`, 1))
 	}))
 	defer server.Close()
 	client, err := api.New(server.URL, "write-key")
