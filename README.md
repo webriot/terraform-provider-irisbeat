@@ -53,7 +53,7 @@ Use an HTTP(S) URL without embedded credentials for HTTP and a DNS name or IP ad
 
 ### Changing Monitor kind
 
-A kind change plans a native replacement with a new ID. If any configured value is unknown during planning, apply its upstream dependencies separately before planning the kind change.
+A kind change plans a native replacement with a new ID. If any configured value or member of `destination_ids` is unknown during planning, apply its upstream dependencies separately before planning the kind change.
 
 By default, Terraform and OpenTofu delete the existing Monitor before creating its replacement. Irisbeat checks installation-specific constraints during the create. The v0.5.0 automation API has no Write-key endpoint to read the check floor or validate a proposed Monitor without saving it. The separate [Operator API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api.md#outbound-check-floor) requires the installation secret. It exposes the floor in Operator snapshots and can preview Calendar schedules.
 
@@ -105,9 +105,17 @@ When the webhook URL is unknown during planning, the plan keeps the existing des
 
 Run `terraform import irisbeat_notification_destination.alerts <destination-id>` or `tofu import irisbeat_notification_destination.alerts <destination-id>` to adopt an existing webhook. The URL is sensitive in routine CLI output and is stored in plan and state files. If a create ends with an unknown outcome, check Irisbeat and import any existing destination before attempting another create.
 
+## Manage Monitor routing
+
+Add `destination_ids = [irisbeat_notification_destination.alerts.id]` to a Monitor to manage its complete set of Notification destination IDs. Reordering IDs produces an empty plan. Apply repairs changes made in the Operator when an explicit set is configured.
+
+Omit `destination_ids` to observe routing in state and leave it under Operator control. This also preserves the saved assignments when importing a Monitor, editing other fields, or removing a previously configured set. Set `destination_ids = []` to clear all assignments.
+
+Irisbeat rejects the entire Monitor write if any selected destination is ineligible. For a pending email destination, ask the recipient to confirm the address and reapply.
+
 ## Verify
 
-`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors and webhook Notification destinations.
+`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors and webhook Notification destinations. To include rejection of pending email assignments, configure [email delivery](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/install.md#optional-email-confirmation) on the disposable installation with a local mail capture binding and set `IRISBEAT_TEST_EMAIL=1`.
 
 ```sh
 export IRISBEAT_TEST_BASE_URL=http://127.0.0.1:8787

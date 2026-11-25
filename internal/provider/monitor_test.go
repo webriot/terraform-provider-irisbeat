@@ -6,7 +6,11 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
 func TestNormalizeHostname(t *testing.T) {
@@ -57,5 +61,43 @@ func TestValidateHTTPTarget(t *testing.T) {
 				t.Fatal("diagnostic included the configured URL")
 			}
 		})
+	}
+}
+
+func TestKindReplacementRejectsPartiallyUnknownAssignments(t *testing.T) {
+	ctx := t.Context()
+	r := &monitorResource{}
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	schema := schemaResp.Schema
+	object := schema.Type().TerraformType(ctx).(tftypes.Object)
+	monitor := func(kind string, assignments []tftypes.Value) tftypes.Value {
+		fields := make(map[string]tftypes.Value, len(object.AttributeTypes))
+		for name, typ := range object.AttributeTypes {
+			fields[name] = tftypes.NewValue(typ, nil)
+		}
+		fields["kind"] = tftypes.NewValue(tftypes.String, kind)
+		if kind == "http" {
+			fields["url"] = tftypes.NewValue(tftypes.String, "https://example.com/")
+		}
+		fields["destination_ids"] = tftypes.NewValue(object.AttributeTypes["destination_ids"], assignments)
+		return tftypes.NewValue(object, fields)
+	}
+	savedID := tftypes.NewValue(tftypes.String, "saved-destination")
+	config := monitor("http", []tftypes.Value{
+		savedID,
+		tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+	})
+	plan := tfsdk.Plan{Schema: schema, Raw: config}
+	resp := resource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(ctx, resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: schema, Raw: config},
+		State:  tfsdk.State{Schema: schema, Raw: monitor("heartbeat", []tftypes.Value{savedID})},
+		Plan:   plan,
+	}, &resp)
+	want := diag.NewAttributeErrorDiagnostic(path.Root("destination_ids"), "Monitor replacement requires a known value",
+		"Resolve this value before planning a Monitor kind change. Apply its upstream dependencies separately, then plan again.")
+	if !resp.Diagnostics.Contains(want) {
+		t.Fatalf("expected a destination_ids diagnostic, got %v", resp.Diagnostics)
 	}
 }
