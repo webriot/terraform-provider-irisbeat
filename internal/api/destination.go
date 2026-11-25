@@ -10,23 +10,41 @@ import (
 var ErrDestinationMissing = errors.New("the Notification destination does not exist in this Irisbeat installation")
 
 type Destination struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Channel string `json:"channel"`
-	URL     string `json:"url"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Channel   string `json:"channel"`
+	URL       string `json:"url"`
+	Address   string `json:"address"`
+	Confirmed *bool  `json:"confirmed"`
 }
 
 var destinations = endpoint[Destination]{
 	path: "/api/v1/destinations", label: "Notification destination",
 	missingMessage: "Destination not found", missing: ErrDestinationMissing,
-	invalidConfig: "Check the name and HTTPS webhook URL",
+	invalidConfig: "Check the name and channel address",
 	valid: func(d Destination, id string) bool {
-		return d.ID != "" && (id == "" || d.ID == id) && d.Name != "" && d.Channel == "webhook" && d.URL != ""
+		if d.ID == "" || (id != "" && d.ID != id) || d.Name == "" {
+			return false
+		}
+		switch d.Channel {
+		case "webhook":
+			return d.URL != ""
+		case "email":
+			return d.Address != "" && d.Confirmed != nil
+		default:
+			return false
+		}
 	},
 }
 
 func (c *Client) CreateDestination(ctx context.Context, fields map[string]any) (Destination, error) {
-	return create(ctx, c, destinations, fields)
+	channel, _ := fields["channel"].(string)
+	if channel == "" {
+		channel = "webhook"
+	}
+	ep := destinations
+	ep.valid = func(d Destination, id string) bool { return d.Channel == channel && destinations.valid(d, id) }
+	return create(ctx, c, ep, fields)
 }
 
 func (c *Client) ReadDestination(ctx context.Context, id string) (Destination, error) {

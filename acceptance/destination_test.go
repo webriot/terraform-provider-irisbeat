@@ -95,27 +95,7 @@ resource "irisbeat_notification_destination" "test" {
 	if strings.Contains(out, "acceptance-token") || !strings.Contains(out, "1 to add, 0 to change, 1 to destroy") {
 		t.Fatal("expected a redacted replacement plan")
 	}
-	var plan struct {
-		Changes []struct {
-			Address string
-			Change  struct {
-				Actions      []string
-				ReplacePaths [][]string      `json:"replace_paths"`
-				AfterUnknown map[string]bool `json:"after_unknown"`
-			}
-		} `json:"resource_changes"`
-	}
-	if err := json.Unmarshal([]byte(w.run(0, "show", "-json", "replace.plan")), &plan); err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Changes) != 1 || plan.Changes[0].Address != destinationAddress {
-		t.Fatal("expected one destination change")
-	}
-	change := plan.Changes[0].Change
-	if strings.Join(change.Actions, ",") != "delete,create" || len(change.ReplacePaths) != 1 ||
-		strings.Join(change.ReplacePaths[0], ".") != "webhook_url" || !change.AfterUnknown["id"] {
-		t.Fatal("expected webhook_url to force replacement with a new ID")
-	}
+	assertDestinationReplacement(t, w, "replace.plan", "webhook_url")
 	w.run(0, "apply", "-no-color", "replace.plan")
 	installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusNotFound)
 	replacementID := w.resourceState(destinationAddress)["id"].(string)
@@ -263,5 +243,30 @@ resource "irisbeat_notification_destination" "test" {
 	out := w.run(1, "apply", "-auto-approve", "-no-color")
 	if !strings.Contains(out, "reported a conflict") || strings.Contains(out, "webhook-conflict-token") {
 		t.Fatal("expected a redacted destination conflict diagnostic")
+	}
+}
+
+func assertDestinationReplacement(t *testing.T, w cliWorkspace, planFile, field string) {
+	t.Helper()
+	var plan struct {
+		Changes []struct {
+			Address string
+			Change  struct {
+				Actions      []string
+				ReplacePaths [][]string      `json:"replace_paths"`
+				AfterUnknown map[string]bool `json:"after_unknown"`
+			}
+		} `json:"resource_changes"`
+	}
+	if err := json.Unmarshal([]byte(w.run(0, "show", "-json", planFile)), &plan); err != nil {
+		t.Fatal("could not decode replacement plan")
+	}
+	if len(plan.Changes) != 1 || plan.Changes[0].Address != destinationAddress {
+		t.Fatal("expected one destination change")
+	}
+	change := plan.Changes[0].Change
+	if strings.Join(change.Actions, ",") != "delete,create" || len(change.ReplacePaths) != 1 ||
+		strings.Join(change.ReplacePaths[0], ".") != field || !change.AfterUnknown["id"] {
+		t.Fatalf("expected %s to force replacement with a new ID", field)
 	}
 }

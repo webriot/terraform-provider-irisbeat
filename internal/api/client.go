@@ -255,6 +255,19 @@ func responseError[T any](resp *http.Response, resource bool, ep endpoint[T]) er
 		}
 		return fmt.Errorf("Irisbeat rejected the %s configuration. %s", ep.label, ep.invalidConfig)
 	case http.StatusConflict:
+		if ep.path == destinations.path {
+			var payload struct {
+				Error string `json:"error"`
+			}
+			if decode(resp.Body, &payload) {
+				switch payload.Error {
+				case "A destination with this name already exists":
+					return errors.New("Irisbeat reported a conflict. A destination with this name already exists. Choose a distinct name or import the existing destination")
+				case "This inbox is already a destination":
+					return errors.New("Irisbeat reported a conflict. This inbox is already a destination. Choose a distinct inbox or import the existing destination")
+				}
+			}
+		}
 		return errors.New("Irisbeat reported a conflict. Check the installation before trying again")
 	case http.StatusNotFound:
 		mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
