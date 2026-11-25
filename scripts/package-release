@@ -16,8 +16,21 @@ fi
 
 source_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 revision=$(git -C "$source_root" rev-parse HEAD)
-# Refuse a signing key that the local GPG agent cannot access.
-gpg --list-secret-keys "$RELEASE_SIGNING_FINGERPRINT" >/dev/null
+# Registries enroll the primary key. Pin the actual RSA signing key as well,
+# since GPG otherwise selects a signing subkey automatically.
+primary=${RELEASE_SIGNING_FINGERPRINT^^}
+signer=$(gpg --batch --with-colons --list-secret-keys "$primary" | awk -F: -v primary="$primary" '
+  $1 == "sec" || $1 == "ssb" {
+    rsa = ($4 == 1 || $4 == 3)
+    primary_record = ($1 == "sec")
+    usable = rsa && $2 !~ /^[redi]$/ && $12 ~ /s/ && $12 !~ /D/ && $15 != "#"
+  }
+  $1 == "fpr" {
+    if (primary_record && ($10 != primary || !rsa)) exit 1
+    if (usable) signer = $10
+  }
+  END { if (!signer) exit 1; print signer }
+') || { echo "Use an RSA primary key with a usable RSA signing key." >&2; exit 2; }
 mkdir -- "$2"
 output=$(cd -- "$2" && pwd)
 build=$(mktemp -d "$output/.build.XXXXXX")
@@ -46,8 +59,12 @@ for os in linux darwin windows; do
 done
 
 sha256sum -- "${prefix}"_*.zip "$manifest" > "$sums"
-gpg --no-armor --local-user "$RELEASE_SIGNING_FINGERPRINT" --output "$sums.sig" --detach-sign "$sums"
-gpg --verify "$sums.sig" "$sums"
+gpg --no-armor --local-user "$signer!" --output "$sums.sig" --detach-sign "$sums"
+gpg --batch --status-fd=1 --verify "$sums.sig" "$sums" |
+  awk -v signer="$signer" -v primary="$primary" '
+    $2 == "VALIDSIG" && $3 == signer && ($10 == 1 || $10 == 3) && $12 == primary { valid = 1 }
+    END { exit !valid }
+  '
 sha256sum --check --strict "$sums"
 mv -- "${prefix}"_*.zip "$manifest" "$sums" "$sums.sig" "$output/"
 printf 'Packaged %s from %s in %s\n' "$version" "$revision" "$output"
