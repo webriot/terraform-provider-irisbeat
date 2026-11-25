@@ -63,7 +63,7 @@ output "nightly_job_receipt_path" {
 }
 ```
 
-For Interval mode, omit the Calendar fields and set `schedule_mode = "interval"`, or omit the mode when creating a Monitor. Interval Heartbeats support `interval_seconds`, `silence_seconds`, and `recovery_spacing_seconds`. Both modes support `recovery_threshold`. Irisbeat supplies omitted timing defaults on create. Schedule changes preserve the Monitor ID. Changing kind replaces the Monitor.
+For Interval mode, omit the Calendar fields and set `schedule_mode = "interval"`, or omit the mode when creating a Monitor. Declaring `interval_seconds`, `silence_seconds`, or `recovery_spacing_seconds` implies Interval mode when `schedule_mode` is omitted. Both modes support `recovery_threshold`. Irisbeat supplies omitted timing defaults on create. Schedule changes preserve the Monitor ID. Changing kind replaces the Monitor.
 
 Configure the job to send an HTTPS POST to the installation URL plus `heartbeat_path`. Set the installation secret in the job's secret store and send it as the Bearer credential. See the [Heartbeat receipt API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/heartbeat-api.md#send-a-receipt).
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -84,21 +85,29 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	validateMonitorConfig(config, &resp.Diagnostics)
+}
+
+func configured(value attr.Value) bool {
+	return !value.IsNull() && !value.IsUnknown()
+}
+
+func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
 	switch config.Kind.ValueString() {
 	case "http":
 		if config.URL.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("url"), "Missing HTTP target", "Configure url for an HTTP Monitor.")
+			diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "Configure url for an HTTP Monitor.")
 		}
-		if !config.SilenceSeconds.IsNull() || !config.RecoverySpacingSeconds.IsNull() || !config.GraceSeconds.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
+		if configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds) || configured(config.GraceSeconds) {
+			diags.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
 		}
 	case "heartbeat":
-		if !config.URL.IsNull() || !config.TimeoutSeconds.IsNull() || !config.FailureThreshold.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("kind"), "HTTP kind required", "Configure url, timeout_seconds, or failure_threshold only for HTTP Monitors.")
+		if configured(config.URL) || configured(config.TimeoutSeconds) || configured(config.FailureThreshold) {
+			diags.AddAttributeError(path.Root("kind"), "HTTP kind required", "Configure url, timeout_seconds, or failure_threshold only for HTTP Monitors.")
 		}
 	default:
-		if !config.Kind.IsNull() && !config.Kind.IsUnknown() {
-			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or heartbeat for the Monitor kind.")
+		if configured(config.Kind) {
+			diags.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or heartbeat for the Monitor kind.")
 		}
 	}
 	if config.ScheduleMode.IsUnknown() {
@@ -107,41 +116,56 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	switch config.ScheduleMode.ValueString() {
 	case "calendar":
 		if config.Kind.ValueString() == "heartbeat" &&
-			(!config.IntervalSeconds.IsNull() || !config.SilenceSeconds.IsNull() || !config.RecoverySpacingSeconds.IsNull()) {
-			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Interval mode required", "Configure interval_seconds, silence_seconds, or recovery_spacing_seconds only for Interval Heartbeats.")
+			(configured(config.IntervalSeconds) || configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds)) {
+			diags.AddAttributeError(path.Root("schedule_mode"), "Interval mode required", "Configure interval_seconds, silence_seconds, or recovery_spacing_seconds only for Interval Heartbeats.")
 		}
 		if config.Cron.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
+			diags.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
 		}
 	case "", "interval":
-		if !config.GraceSeconds.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("grace_seconds"), "Calendar mode required", "Set schedule_mode to calendar to configure grace_seconds.")
+		if configured(config.GraceSeconds) {
+			diags.AddAttributeError(path.Root("grace_seconds"), "Calendar mode required", "Set schedule_mode to calendar to configure grace_seconds.")
 		}
-		if !config.Cron.IsNull() || !config.Timezone.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
+		if configured(config.Cron) || configured(config.Timezone) {
+			diags.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
 		}
 		if !config.ScheduleMode.IsNull() && config.ScheduleMode.ValueString() == "" {
-			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
+			diags.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
 		}
 	default:
-		resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
+		diags.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
 	}
 }
 
-// An import has no configuration, so it records the server's canonical spelling.
-// Keep that state when every configured field already describes the saved Monitor.
 func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var config, prior types.Object
+	var config types.Object
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	desiredFields := config.Attributes()
+	if desiredFields["kind"].Equal(types.StringValue("heartbeat")) && desiredFields["schedule_mode"].IsNull() &&
+		(configured(desiredFields["interval_seconds"]) || configured(desiredFields["silence_seconds"]) || configured(desiredFields["recovery_spacing_seconds"])) {
+		interval := types.StringValue("interval")
+		desiredFields["schedule_mode"] = interval
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("schedule_mode"), interval)...)
+	}
+	if req.State.Raw.IsNull() || resp.Diagnostics.HasError() {
+		return
+	}
+
+	// An import records the server's canonical spelling. Keep it when every
+	// configured field already describes the saved Monitor.
+	var prior types.Object
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	savedFields := prior.Attributes()
-	for name, desired := range config.Attributes() {
+	for name, desired := range desiredFields {
 		saved := savedFields[name]
 		if desired.IsNull() || desired.Equal(saved) {
 			continue
@@ -166,8 +190,13 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 }
 
 func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan monitorModel
+	var config, plan monitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	validateMonitorConfig(config, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -202,9 +231,14 @@ func (r *monitorResource) Read(ctx context.Context, req resource.ReadRequest, re
 }
 
 func (r *monitorResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, prior monitorModel
+	var config, plan, prior monitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	validateMonitorConfig(config, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
