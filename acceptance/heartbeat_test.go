@@ -100,24 +100,42 @@ output "receipt" {
 			assertFields(t, installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK), expected)
 			w.run(0, "plan", "-detailed-exitcode", noColor)
 
-			config("http", `url = "https://example.com/"`)
-			replace := []string{"delete", "create"}
-			w.heartbeatPlan(replace, "")
-			w.run(0, "apply", autoApprove, noColor)
-			httpID := w.monitor()["id"].(string)
-			assertFields(t, w.monitor(), map[string]any{"kind": "http", "heartbeat_path": nil})
-			installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusNotFound)
+			currentID := id
+			for _, target := range []struct{ kind, fields string }{
+				{"http", `url = "https://example.com/"`},
+				{"tcp", `hostname = "db.example.com"
+port = 5432`},
+			} {
+				config(target.kind, target.fields)
+				replace := []string{"delete", "create"}
+				w.heartbeatPlan(replace, "")
+				w.run(0, "apply", noColor, "heartbeat.tfplan")
+				outboundID := w.monitor()["id"].(string)
+				if outboundID == currentID {
+					t.Fatal("replacement reused the Heartbeat Monitor ID")
+				}
+				assertFields(t, w.monitor(), map[string]any{
+					"kind": target.kind, "heartbeat_path": nil, "silence_seconds": nil, "grace_seconds": nil,
+				})
+				installationRequest(t, http.MethodGet, baseURL+"/api/v1/monitors/"+currentID, key, "", http.StatusNotFound)
+				w.run(0, "plan", "-detailed-exitcode", noColor)
 
-			config("heartbeat", fields)
-			w.heartbeatPlan(replace, "")
-			w.run(0, "apply", autoApprove, noColor)
-			finalID := w.monitor()["id"].(string)
-			if finalID == httpID || finalID == id {
-				t.Fatal("replacement reused a Monitor ID")
+				config("heartbeat", fields)
+				w.heartbeatPlan(replace, "")
+				w.run(0, "apply", noColor, "heartbeat.tfplan")
+				currentID = w.monitor()["id"].(string)
+				if currentID == outboundID || currentID == id {
+					t.Fatal("replacement reused a Monitor ID")
+				}
+				assertFields(t, w.monitor(), map[string]any{
+					"heartbeat_path": "/heartbeat/" + currentID, "hostname": nil, "port": nil, "url": nil,
+				})
+				installationRequest(t, http.MethodGet, baseURL+"/api/v1/monitors/"+outboundID, key, "", http.StatusNotFound)
+				installationRequest(t, http.MethodPost, baseURL+"/heartbeat/"+currentID, secret, "", http.StatusNoContent)
+				w.run(0, "plan", "-detailed-exitcode", noColor)
 			}
-			assertFields(t, w.monitor(), map[string]any{"heartbeat_path": "/heartbeat/" + finalID})
 			w.run(0, "destroy", autoApprove, noColor)
-			installationRequest(t, http.MethodGet, baseURL+"/api/v1/monitors/"+finalID, key, "", http.StatusNotFound)
+			installationRequest(t, http.MethodGet, baseURL+"/api/v1/monitors/"+currentID, key, "", http.StatusNotFound)
 		})
 	}
 }
@@ -187,6 +205,29 @@ func TestMonitorInputsResolvedAtApply(t *testing.T) {
   silence_seconds = terraform_data.inputs.output`,
 		},
 		{
+			name: "null TCP target on Heartbeat", kind: "heartbeat",
+			input: `{ hostname = tostring(null), port = tonumber(null) }`,
+			fields: `hostname = terraform_data.inputs.output.hostname
+  port = terraform_data.inputs.output.port`,
+		},
+		{
+			name: "disallowed TCP target on Heartbeat", kind: "heartbeat",
+			input: `{ hostname = "db.example.com", port = 5432 }`,
+			fields: `hostname = terraform_data.inputs.output.hostname
+  port = terraform_data.inputs.output.port`, diagnostic: "TCP kind required",
+		},
+		{
+			name: "disallowed Heartbeat timing on TCP", kind: "tcp", input: "250",
+			fields: `hostname = "db.example.com"
+  port = 5432
+  silence_seconds = terraform_data.inputs.output`, diagnostic: "Heartbeat kind required",
+		},
+		{
+			name: "invalid TCP port", kind: "tcp", input: "65536",
+			fields: `hostname = "db.example.com"
+  port = terraform_data.inputs.output`, diagnostic: "Invalid TCP port",
+		},
+		{
 			name: "disallowed HTTP field", kind: "heartbeat",
 			input: `{ url = "https://example.com/" }`, fields: "url = terraform_data.inputs.output.url",
 			diagnostic: "HTTP kind required",
@@ -209,7 +250,7 @@ func TestMonitorInputsResolvedAtApply(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := workspace(t, baseURL, key)
-			w.config(fmt.Sprintf(`
+			config := fmt.Sprintf(`
 resource "terraform_data" "inputs" {
   input = %s
 }
@@ -220,7 +261,8 @@ resource "irisbeat_monitor" "test" {
   %s
   %s
 }
-`, tc.input, tc.kind, tc.schedule, tc.fields))
+`, tc.input, tc.kind, tc.schedule, tc.fields)
+			w.config(config)
 			w.run(2, "plan", "-detailed-exitcode", "-no-color", "-out=inputs.tfplan")
 			if tc.diagnostic != "" {
 				out := w.run(1, "apply", "-no-color", "inputs.tfplan")
@@ -232,6 +274,12 @@ resource "irisbeat_monitor" "test" {
 
 			w.run(0, "apply", "-no-color", "inputs.tfplan")
 			assertFields(t, w.monitor(), map[string]any{"kind": tc.kind})
+			w.run(0, "plan", "-detailed-exitcode", "-no-color")
+			id := w.monitor()["id"]
+			w.config(strings.Replace(config, "Resolved input acceptance", "Updated Monitor", 1))
+			w.run(2, "plan", "-detailed-exitcode", "-no-color", "-replace=terraform_data.inputs", "-out=inputs.tfplan")
+			w.run(0, "apply", "-no-color", "inputs.tfplan")
+			assertFields(t, w.monitor(), map[string]any{"id": id, "name": "Updated Monitor"})
 			w.run(0, "plan", "-detailed-exitcode", "-no-color")
 			w.run(0, "destroy", "-auto-approve", "-no-color")
 		})

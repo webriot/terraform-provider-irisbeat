@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP and Heartbeat Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
+Manage HTTP, TCP, and Heartbeat Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
 
 ## Run a local build
 
@@ -39,9 +39,19 @@ resource "irisbeat_monitor" "website" {
   url       = "https://example.com/"
   published = false
 }
+
+resource "irisbeat_monitor" "database" {
+  name      = "Database"
+  kind      = "tcp"
+  hostname  = "db.example.com"
+  port      = 5432
+  published = false
+}
 ```
 
-Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` for HTTP Monitors in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
+Use a DNS name or IP address for the TCP hostname and a port from 1 to 65535. Target and schedule edits preserve the Monitor ID. Changing the kind replaces the Monitor. If any configured value is unknown during planning, apply its upstream dependencies separately before planning the kind change.
+
+Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` for HTTP and TCP Monitors in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
 
 To adopt a Monitor, declare its matching saved configuration and run `terraform import irisbeat_monitor.website <monitor-id>` or `tofu import irisbeat_monitor.website <monitor-id>` using its ID from the same installation. If an interrupted create leaves the outcome unknown, check Irisbeat and import any existing Monitor before attempting another create.
 

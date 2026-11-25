@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
@@ -17,6 +18,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	whatwg "github.com/nlnwa/whatwg-url/url"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type monitorResource struct{ client *api.Client }
@@ -26,6 +29,8 @@ type monitorModel struct {
 	Name              types.String `tfsdk:"name"`
 	Kind              types.String `tfsdk:"kind"`
 	URL               types.String `tfsdk:"url"`
+	Hostname          types.String `tfsdk:"hostname"`
+	Port              types.Int64  `tfsdk:"port"`
 	Published         types.Bool   `tfsdk:"published"`
 	ScheduleMode      types.String `tfsdk:"schedule_mode"`
 	IntervalSeconds   types.Int64  `tfsdk:"interval_seconds"`
@@ -49,11 +54,13 @@ func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	resp.Schema = schema.Schema{Description: "Manages an Irisbeat Monitor.", Attributes: map[string]schema.Attribute{
 		"id":                 schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Opaque Irisbeat Monitor ID."},
 		"name":               schema.StringAttribute{Required: true, Description: "Monitor name."},
-		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http or heartbeat."},
+		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http, tcp, or heartbeat."},
 		"url":                schema.StringAttribute{Optional: true, Description: "HTTP or HTTPS check target. Required for HTTP Monitors."},
+		"hostname":           schema.StringAttribute{Optional: true, Description: "DNS name or IP address. Required for TCP Monitors."},
+		"port":               schema.Int64Attribute{Optional: true, Description: "Port from 1 to 65535. Required for TCP Monitors."},
 		"published":          schema.BoolAttribute{Required: true, Description: "Whether the Monitor appears on the public status page."},
 		"schedule_mode":      schema.StringAttribute{Optional: true, Computed: true, Description: "interval or calendar. New Monitors default to interval."},
-		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Check interval or expected Heartbeat receipt interval in seconds. HTTP Monitors retain it in Calendar mode."},
+		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Check interval or expected Heartbeat receipt interval in seconds. HTTP and TCP Monitors retain it in Calendar mode."},
 		"timeout_seconds":    schema.Int64Attribute{Optional: true, Computed: true, Description: "Check timeout in seconds."},
 		"failure_threshold":  schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive failures required to open an Incident."},
 		"recovery_threshold": schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive successes required to resolve an Incident."},
@@ -93,21 +100,46 @@ func configured(value attr.Value) bool {
 }
 
 func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
-	switch config.Kind.ValueString() {
+	kind := config.Kind.ValueString()
+	switch kind {
 	case "http":
 		if config.URL.IsNull() {
-			diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "Configure url for an HTTP Monitor.")
+			diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
 		}
-		if configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds) || configured(config.GraceSeconds) {
-			diags.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
+	case "tcp":
+		if config.Hostname.IsNull() || (configured(config.Hostname) && config.Hostname.ValueString() == "") {
+			diags.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
+		}
+		if config.Port.IsNull() {
+			diags.AddAttributeError(path.Root("port"), "Missing TCP port", "TCP Monitors require port.")
+		} else if configured(config.Port) && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
+			diags.AddAttributeError(path.Root("port"), "Invalid TCP port", "Use an integer from 1 to 65535.")
 		}
 	case "heartbeat":
-		if configured(config.URL) || configured(config.TimeoutSeconds) || configured(config.FailureThreshold) {
-			diags.AddAttributeError(path.Root("kind"), "HTTP kind required", "Configure url, timeout_seconds, or failure_threshold only for HTTP Monitors.")
+		if configured(config.TimeoutSeconds) || configured(config.FailureThreshold) {
+			diags.AddAttributeError(path.Root("kind"), "Outbound Monitor kind required", "Configure timeout_seconds or failure_threshold only for HTTP or TCP Monitors.")
 		}
 	default:
 		if configured(config.Kind) {
-			diags.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or heartbeat for the Monitor kind.")
+			diags.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http, tcp, or heartbeat for the Monitor kind.")
+		}
+	}
+	if kind == "tcp" || kind == "heartbeat" {
+		if configured(config.URL) {
+			diags.AddAttributeError(path.Root("url"), "HTTP kind required", "url is only available for HTTP Monitors.")
+		}
+	}
+	if kind == "http" || kind == "heartbeat" {
+		if configured(config.Hostname) {
+			diags.AddAttributeError(path.Root("hostname"), "TCP kind required", "hostname is only available for TCP Monitors.")
+		}
+		if configured(config.Port) {
+			diags.AddAttributeError(path.Root("port"), "TCP kind required", "port is only available for TCP Monitors.")
+		}
+	}
+	if kind == "http" || kind == "tcp" {
+		if configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds) || configured(config.GraceSeconds) {
+			diags.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
 		}
 	}
 	if config.ScheduleMode.IsUnknown() {
@@ -157,14 +189,27 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		return
 	}
 
-	// An import records the server's canonical spelling. Keep it when every
-	// configured field already describes the saved Monitor.
 	var prior types.Object
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	savedFields := prior.Attributes()
+	if !desiredFields["kind"].Equal(savedFields["kind"]) {
+		// The CLI can delete the old Monitor before Create validates resolved inputs.
+		for name, desired := range desiredFields {
+			if desired.IsUnknown() {
+				resp.Diagnostics.AddAttributeError(path.Root(name), "Monitor replacement requires a known value",
+					"Resolve this value before planning a Monitor kind change. Apply its upstream dependencies separately, then plan again.")
+			}
+		}
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
+	// An import records the server's canonical spelling. Keep it when every
+	// configured field already describes the saved Monitor.
 	for name, desired := range desiredFields {
 		saved := savedFields[name]
 		if desired.IsNull() || desired.Equal(saved) {
@@ -176,6 +221,8 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 			normalize = trimJS
 		case "url":
 			normalize = normalizeURL
+		case "hostname":
+			normalize = normalizeHostname
 		case "cron":
 			normalize = normalizeCron
 		default:
@@ -292,6 +339,7 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 		{"name", desired.Name, prior.Name},
 		{"kind", desired.Kind, prior.Kind},
 		{"url", desired.URL, prior.URL},
+		{"hostname", desired.Hostname, prior.Hostname},
 		{"scheduleMode", desired.ScheduleMode, prior.ScheduleMode},
 		{"cron", desired.Cron, prior.Cron},
 		{"timezone", desired.Timezone, prior.Timezone},
@@ -307,6 +355,7 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 		key        string
 		value, old types.Int64
 	}{
+		{"port", desired.Port, prior.Port},
 		{"intervalSeconds", desired.IntervalSeconds, prior.IntervalSeconds},
 		{"timeoutSeconds", desired.TimeoutSeconds, prior.TimeoutSeconds},
 		{"failureThreshold", desired.FailureThreshold, prior.FailureThreshold},
@@ -323,8 +372,8 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 }
 
 func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
-	if m.Kind != "http" && m.Kind != "heartbeat" {
-		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP and Heartbeat Monitors.")
+	if m.Kind != "http" && m.Kind != "tcp" && m.Kind != "heartbeat" {
+		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP, TCP, and Heartbeat Monitors.")
 		return monitorModel{}, false
 	}
 	state := monitorModel{
@@ -333,12 +382,7 @@ func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
 		RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
 	}
-	if m.Kind == "http" {
-		state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
-		state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
-		state.TimeoutSeconds = types.Int64Value(m.TimeoutSeconds)
-		state.FailureThreshold = types.Int64Value(m.FailureThreshold)
-	} else {
+	if m.Kind == "heartbeat" {
 		state.HeartbeatPath = types.StringValue("/heartbeat/" + url.PathEscape(m.ID))
 		if m.ScheduleMode == "calendar" {
 			state.GraceSeconds = types.Int64Value(m.GraceSeconds)
@@ -346,6 +390,16 @@ func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics
 			state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
 			state.SilenceSeconds = types.Int64Value(m.SilenceSeconds)
 			state.RecoverySpacingSeconds = types.Int64Value(m.RecoverySpacingSeconds)
+		}
+	} else {
+		state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
+		state.TimeoutSeconds = types.Int64Value(m.TimeoutSeconds)
+		state.FailureThreshold = types.Int64Value(m.FailureThreshold)
+		if m.Kind == "tcp" {
+			state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
+			state.Port = types.Int64Value(m.Port)
+		} else {
+			state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
 		}
 	}
 	if m.ScheduleMode == "calendar" {
@@ -380,4 +434,24 @@ func normalizeURL(value string) string {
 		return value
 	}
 	return parsed.Href(true)
+}
+
+var ipv6Literal = regexp.MustCompile(`^[0-9a-f:.]+$`)
+
+func normalizeHostname(value string) string {
+	// Irisbeat uses ECMAScript full, locale-independent Unicode lowercasing.
+	host := cases.Lower(language.Und).String(value)
+	if !strings.Contains(host, ":") {
+		return host
+	}
+	literal := host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		literal = host[1 : len(host)-1]
+	}
+	if ipv6Literal.MatchString(literal) {
+		if parsed, err := whatwg.Parse("http://[" + literal + "]/"); err == nil {
+			return strings.Trim(parsed.Hostname(), "[]")
+		}
+	}
+	return value
 }

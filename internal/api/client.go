@@ -59,6 +59,8 @@ type Monitor struct {
 	Name              string `json:"name"`
 	Kind              string `json:"kind"`
 	URL               string `json:"url"`
+	Hostname          string `json:"hostname"`
+	Port              int64  `json:"port"`
 	Published         *bool  `json:"published"`
 	ScheduleMode      string `json:"scheduleMode"`
 	IntervalSeconds   int64  `json:"intervalSeconds"`
@@ -85,11 +87,11 @@ func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Moni
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	idempotencyKey := hex.EncodeToString(key)
-	kind := "http"
-	if requested, ok := fields["kind"].(string); ok {
-		kind = requested
+	kind, _ := fields["kind"].(string)
+	if kind == "" {
+		kind = "http"
 	}
+	idempotencyKey := hex.EncodeToString(key)
 	uncertain := false
 	for attempt := 0; attempt < 3; attempt++ {
 		monitor, retry, err := c.request(ctx, http.MethodPost, "", idempotencyKey, body, http.StatusCreated)
@@ -177,15 +179,18 @@ func (c *Client) request(ctx context.Context, method, id, key string, body []byt
 	var monitor Monitor
 	if !decode(resp.Body, &monitor) || monitor.ID == "" || (id != "" && monitor.ID != id) ||
 		monitor.Name == "" || monitor.Kind == "" || monitor.Published == nil ||
-		(monitor.Kind == "http" && !validHTTPMonitor(monitor)) ||
+		((monitor.Kind == "http" || monitor.Kind == "tcp") && !validOutboundMonitor(monitor)) ||
 		(monitor.Kind == "heartbeat" && !validHeartbeatMonitor(monitor)) {
 		return Monitor{}, true, errUnexpected
 	}
 	return monitor, false, nil
 }
 
-func validHTTPMonitor(m Monitor) bool {
-	if m.URL == "" || m.IntervalSeconds < 1 || m.TimeoutSeconds < 1 || m.FailureThreshold < 1 || m.RecoveryThreshold < 1 {
+func validOutboundMonitor(m Monitor) bool {
+	if m.Kind == "http" && m.URL == "" || m.Kind == "tcp" && (m.Hostname == "" || m.Port < 1 || m.Port > 65535) {
+		return false
+	}
+	if m.IntervalSeconds < 1 || m.TimeoutSeconds < 1 || m.FailureThreshold < 1 || m.RecoveryThreshold < 1 {
 		return false
 	}
 	return m.ScheduleMode == "interval" || (m.ScheduleMode == "calendar" && m.Cron != "" && m.Timezone != "")
