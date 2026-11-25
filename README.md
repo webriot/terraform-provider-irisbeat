@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP Monitors and webhook Notification destinations on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
+Manage HTTP and TCP Monitors and webhook Notification destinations on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
 
 ## Run a local build
 
@@ -39,7 +39,17 @@ resource "irisbeat_monitor" "website" {
   url       = "https://example.com/"
   published = false
 }
+
+resource "irisbeat_monitor" "database" {
+  name      = "Database"
+  kind      = "tcp"
+  hostname  = "db.example.com"
+  port      = 5432
+  published = false
+}
 ```
+
+Use a DNS name or IP address for the TCP hostname and a port from 1 to 65535. Target and schedule edits preserve the Monitor ID. Changing the kind replaces the Monitor.
 
 Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
 

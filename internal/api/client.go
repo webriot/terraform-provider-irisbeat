@@ -57,6 +57,8 @@ type Monitor struct {
 	Name              string `json:"name"`
 	Kind              string `json:"kind"`
 	URL               string `json:"url"`
+	Hostname          string `json:"hostname"`
+	Port              int64  `json:"port"`
 	Published         *bool  `json:"published"`
 	ScheduleMode      string `json:"scheduleMode"`
 	IntervalSeconds   int64  `json:"intervalSeconds"`
@@ -78,13 +80,18 @@ var monitors = endpoint[Monitor]{
 	invalidConfig: "Check the target, schedule, timing, and installation check floor",
 	valid: func(m Monitor, id string) bool {
 		return m.ID != "" && (id == "" || m.ID == id) && m.Name != "" &&
-			m.Kind != "" && m.Published != nil && (m.Kind != "http" || validHTTPMonitor(m))
+			m.Kind != "" && m.Published != nil &&
+			((m.Kind != "http" && m.Kind != "tcp") || validOutboundMonitor(m))
 	},
 }
 
 func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Monitor, error) {
+	kind, _ := fields["kind"].(string)
+	if kind == "" {
+		kind = "http"
+	}
 	ep := monitors
-	ep.valid = func(m Monitor, id string) bool { return m.Kind == "http" && monitors.valid(m, id) }
+	ep.valid = func(m Monitor, id string) bool { return m.Kind == kind && monitors.valid(m, id) }
 	return create(ctx, c, ep, fields)
 }
 
@@ -196,8 +203,11 @@ func request[T any](ctx context.Context, c *Client, ep endpoint[T], method, id, 
 	return saved, false, nil
 }
 
-func validHTTPMonitor(m Monitor) bool {
-	if m.URL == "" || m.IntervalSeconds < 1 || m.TimeoutSeconds < 1 || m.FailureThreshold < 1 || m.RecoveryThreshold < 1 {
+func validOutboundMonitor(m Monitor) bool {
+	if m.Kind == "http" && m.URL == "" || m.Kind == "tcp" && (m.Hostname == "" || m.Port < 1 || m.Port > 65535) {
+		return false
+	}
+	if m.IntervalSeconds < 1 || m.TimeoutSeconds < 1 || m.FailureThreshold < 1 || m.RecoveryThreshold < 1 {
 		return false
 	}
 	return m.ScheduleMode == "interval" || (m.ScheduleMode == "calendar" && m.Cron != "" && m.Timezone != "")

@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
@@ -15,6 +16,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	whatwg "github.com/nlnwa/whatwg-url/url"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type monitorResource struct{ client *api.Client }
@@ -24,6 +27,8 @@ type monitorModel struct {
 	Name              types.String `tfsdk:"name"`
 	Kind              types.String `tfsdk:"kind"`
 	URL               types.String `tfsdk:"url"`
+	Hostname          types.String `tfsdk:"hostname"`
+	Port              types.Int64  `tfsdk:"port"`
 	Published         types.Bool   `tfsdk:"published"`
 	ScheduleMode      types.String `tfsdk:"schedule_mode"`
 	IntervalSeconds   types.Int64  `tfsdk:"interval_seconds"`
@@ -39,11 +44,13 @@ func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataReque
 }
 
 func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	resp.Schema = schema.Schema{Description: "Manages an Irisbeat HTTP Monitor.", Attributes: map[string]schema.Attribute{
+	resp.Schema = schema.Schema{Description: "Manages an Irisbeat HTTP or TCP Monitor.", Attributes: map[string]schema.Attribute{
 		"id":                 schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Opaque Irisbeat Monitor ID."},
 		"name":               schema.StringAttribute{Required: true, Description: "Monitor name."},
-		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http."},
-		"url":                schema.StringAttribute{Required: true, Description: "HTTP or HTTPS check target."},
+		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http or tcp."},
+		"url":                schema.StringAttribute{Optional: true, Description: "HTTP or HTTPS check target. Required for HTTP Monitors."},
+		"hostname":           schema.StringAttribute{Optional: true, Description: "DNS name or IP address. Required for TCP Monitors."},
+		"port":               schema.Int64Attribute{Optional: true, Description: "Port from 1 to 65535. Required for TCP Monitors."},
 		"published":          schema.BoolAttribute{Required: true, Description: "Whether the Monitor appears on the public status page."},
 		"schedule_mode":      schema.StringAttribute{Optional: true, Computed: true, Description: "interval or calendar. New Monitors default to interval."},
 		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Outbound check interval, retained when scheduling in Calendar mode."},
@@ -73,8 +80,33 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if !config.Kind.IsNull() && !config.Kind.IsUnknown() && config.Kind.ValueString() != "http" {
-		resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http for the Monitor kind.")
+	switch config.Kind.ValueString() {
+	case "http":
+		if config.URL.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
+		}
+		if !config.Hostname.IsNull() && !config.Hostname.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Unexpected HTTP target attribute", "hostname is only available for TCP Monitors.")
+		}
+		if !config.Port.IsNull() && !config.Port.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("port"), "Unexpected HTTP target attribute", "port is only available for TCP Monitors.")
+		}
+	case "tcp":
+		if config.Hostname.IsNull() || (!config.Hostname.IsUnknown() && config.Hostname.ValueString() == "") {
+			resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
+		}
+		if config.Port.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("port"), "Missing TCP port", "TCP Monitors require port.")
+		} else if !config.Port.IsUnknown() && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
+			resp.Diagnostics.AddAttributeError(path.Root("port"), "Invalid TCP port", "Use an integer from 1 to 65535.")
+		}
+		if !config.URL.IsNull() && !config.URL.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("url"), "Unexpected TCP target attribute", "url is only available for HTTP Monitors.")
+		}
+	default:
+		if !config.Kind.IsNull() && !config.Kind.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or tcp for the Monitor kind.")
+		}
 	}
 	if config.ScheduleMode.IsUnknown() {
 		return
@@ -120,6 +152,8 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 			normalize = trimJS
 		case "url":
 			normalize = normalizeURL
+		case "hostname":
+			normalize = normalizeHostname
 		case "cron":
 			normalize = normalizeCron
 		default:
@@ -226,6 +260,7 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 		{"name", desired.Name, prior.Name},
 		{"kind", desired.Kind, prior.Kind},
 		{"url", desired.URL, prior.URL},
+		{"hostname", desired.Hostname, prior.Hostname},
 		{"scheduleMode", desired.ScheduleMode, prior.ScheduleMode},
 		{"cron", desired.Cron, prior.Cron},
 		{"timezone", desired.Timezone, prior.Timezone},
@@ -241,6 +276,7 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 		key        string
 		value, old types.Int64
 	}{
+		{"port", desired.Port, prior.Port},
 		{"intervalSeconds", desired.IntervalSeconds, prior.IntervalSeconds},
 		{"timeoutSeconds", desired.TimeoutSeconds, prior.TimeoutSeconds},
 		{"failureThreshold", desired.FailureThreshold, prior.FailureThreshold},
@@ -254,16 +290,22 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 }
 
 func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
-	if m.Kind != "http" {
-		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP Monitors.")
+	if m.Kind != "http" && m.Kind != "tcp" {
+		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP and TCP Monitors.")
 		return monitorModel{}, false
 	}
 	state := monitorModel{
 		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, trimJS),
-		Kind: types.StringValue(m.Kind), URL: equivalentString(m.URL, reference.URL, normalizeURL),
+		Kind:      types.StringValue(m.Kind),
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
 		IntervalSeconds: types.Int64Value(m.IntervalSeconds), TimeoutSeconds: types.Int64Value(m.TimeoutSeconds),
 		FailureThreshold: types.Int64Value(m.FailureThreshold), RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
+	}
+	if m.Kind == "tcp" {
+		state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
+		state.Port = types.Int64Value(m.Port)
+	} else {
+		state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
 	}
 	if m.ScheduleMode == "calendar" {
 		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)
@@ -297,4 +339,24 @@ func normalizeURL(value string) string {
 		return value
 	}
 	return parsed.Href(true)
+}
+
+var ipv6Literal = regexp.MustCompile(`^[0-9a-f:.]+$`)
+
+func normalizeHostname(value string) string {
+	// Irisbeat uses ECMAScript full, locale-independent Unicode lowercasing.
+	host := cases.Lower(language.Und).String(value)
+	if !strings.Contains(host, ":") {
+		return host
+	}
+	literal := host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		literal = host[1 : len(host)-1]
+	}
+	if ipv6Literal.MatchString(literal) {
+		if parsed, err := whatwg.Parse("http://[" + literal + "]/"); err == nil {
+			return strings.Trim(parsed.Hostname(), "[]")
+		}
+	}
+	return value
 }
