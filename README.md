@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
+Manage HTTP and TCP Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
 
 ## Run a local build
 
@@ -39,7 +39,17 @@ resource "irisbeat_monitor" "website" {
   url       = "https://example.com/"
   published = false
 }
+
+resource "irisbeat_monitor" "database" {
+  name      = "Database"
+  kind      = "tcp"
+  hostname  = "db.example.com"
+  port      = 5432
+  published = false
+}
 ```
+
+Use a DNS name or IP address for the TCP hostname and a port from 1 to 65535. Target and schedule edits preserve the Monitor ID. Changing the kind replaces the Monitor.
 
 Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
 
@@ -47,7 +57,7 @@ To adopt a Monitor, declare its matching saved configuration and run `terraform 
 
 ## Verify
 
-`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete a Monitor.
+`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors.
 
 ```sh
 export IRISBEAT_TEST_BASE_URL=http://127.0.0.1:8787
