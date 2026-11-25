@@ -147,7 +147,7 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 				resp.Diagnostics.AddError("Invalid Irisbeat email address", "Use one email mailbox of at most 254 characters.")
 				return
 			}
-		} else if !address.Equal(priorAddress) {
+		} else if address.IsNull() || !address.Equal(priorAddress) {
 			// A saved Discord URL can exceed the input limit after normalization.
 			if _, valid := parseWebhookURL(value); !valid || utf16Length(value) > 2048 {
 				// Attribute diagnostics may display the URL literal in a source excerpt.
@@ -165,6 +165,12 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 	if !plan.Channel.Equal(prior.Channel) {
+		// Replacement can delete the old destination before the address is resolved.
+		if address.IsUnknown() || inactive.IsUnknown() {
+			resp.Diagnostics.AddError("Notification channel change requires known addresses",
+				"Resolve webhook_url and email_address before changing the channel. Apply the upstream dependencies separately, then run a fresh plan.")
+			return
+		}
 		resp.Diagnostics.AddWarning("Notification channel requires replacement", "If the CLI stops because the channel changed during apply, run a fresh plan and review the destination replacement before applying it.")
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("channel"))
 		return

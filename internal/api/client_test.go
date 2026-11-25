@@ -81,18 +81,25 @@ func TestCreateRetryTermination(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		status, attempts int
+		retryFirst       bool
 		message          string
 	}{
-		{"transient", http.StatusServiceUnavailable, 3, "import any existing Monitor"},
-		{"unauthorized", http.StatusUnauthorized, 1, "invalid, expired, or revoked"},
-		{"forbidden", http.StatusForbidden, 1, "insufficient permission"},
-		{"conflict", http.StatusConflict, 1, "reported a conflict"},
+		{"transient", http.StatusServiceUnavailable, 3, false, "import any existing Monitor"},
+		{"unauthorized", http.StatusUnauthorized, 1, false, "invalid, expired, or revoked"},
+		{"forbidden", http.StatusForbidden, 1, false, "insufficient permission"},
+		{"conflict", http.StatusConflict, 1, false, "reported a conflict"},
+		{"retry then unauthorized", http.StatusUnauthorized, 2, true, "invalid, expired, or revoked"},
+		{"retry then forbidden", http.StatusForbidden, 2, true, "insufficient permission"},
+		{"retry then conflict", http.StatusConflict, 2, true, "reported a conflict"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var attempts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				attempts.Add(1)
-				w.WriteHeader(tc.status)
+				status := tc.status
+				if attempts.Add(1) == 1 && tc.retryFirst {
+					status = http.StatusServiceUnavailable
+				}
+				w.WriteHeader(status)
 				_, _ = io.WriteString(w, `{"error":"response-secret"}`)
 			}))
 			defer server.Close()
@@ -103,6 +110,9 @@ func TestCreateRetryTermination(t *testing.T) {
 			_, err = client.CreateMonitor(context.Background(), map[string]any{"name": "body-secret"})
 			if err == nil || !strings.Contains(err.Error(), tc.message) || strings.Contains(err.Error(), "-secret") {
 				t.Fatal("expected a safe, classified create error")
+			}
+			if tc.retryFirst && !strings.Contains(err.Error(), "import any existing Monitor") {
+				t.Fatal("expected recovery instructions after the retry")
 			}
 			if int(attempts.Load()) != tc.attempts {
 				t.Fatalf("attempts = %d, want %d", attempts.Load(), tc.attempts)

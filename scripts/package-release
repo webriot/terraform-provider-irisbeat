@@ -39,6 +39,9 @@ trap 'rm -rf -- "$build"' EXIT
 # Build only the committed files, even when local development files are present.
 git -C "$source_root" archive "$revision" | tar -xf - -C "$build"
 cd -- "$build"
+export LC_ALL=C GOENV=off GOFLAGS= GOWORK=off GOEXPERIMENT= GOFIPS140=off GOTOOLCHAIN=go1.25.0 CGO_ENABLED=0 GOAMD64=v1 GOARM64=v8.0
+go mod download
+go mod verify
 name=terraform-provider-irisbeat
 prefix="${name}_${version}"
 manifest="${prefix}_manifest.json"
@@ -51,9 +54,10 @@ for os in linux darwin windows; do
     if [[ $os == windows ]]; then
       binary+=".exe"
     fi
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -mod=readonly -trimpath -buildvcs=false \
+    export GOOS="$os" GOARCH="$arch"
+    go build -mod=readonly -trimpath -buildvcs=false \
       -ldflags="-X main.version=$version" -o "$binary" .
-    python3 -m zipfile -c "${prefix}_${os}_${arch}.zip" "$binary" LICENSE NOTICE
+    python3 scripts/package-zip.py "${prefix}_${os}_${arch}.zip" "$binary" "$revision"
     rm -- "$binary"
   done
 done

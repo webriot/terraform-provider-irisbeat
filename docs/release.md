@@ -12,7 +12,7 @@ Use one public GitHub release in [Webriot/terraform-provider-irisbeat](https://g
 
 Run the [Go and CLI acceptance checks](../README.md#verify) against the released Irisbeat source and tested CLI floors. Use the SHA256SUMS attached to the [Irisbeat v0.5.0 release](https://github.com/Webriot/irisbeat/releases/tag/v0.5.0) to verify its source archive. Record the provider revision, the Irisbeat release, each CLI version and test results. Enable simulated email delivery to exercise confirmation and cutover.
 
-Run the package script on Linux with Bash, Git, Go 1.25+, Python 3, GNU coreutils and GPG. Set `RELEASE_SIGNING_FINGERPRINT` to the selected key's full fingerprint and unlock the key with your normal GPG agent. The script builds from the checked-out commit. Set `scratch` to an absolute workspace scratch directory outside the source checkout.
+Run the package script on Linux with Bash, Git, a Go 1.25+ launcher, Python 3.9+, GNU coreutils and GPG. The script selects the audited Go 1.25.0 toolchain. Set `RELEASE_SIGNING_FINGERPRINT` to the selected key's full fingerprint and unlock the key with your normal GPG agent. The script builds from the checked-out commit. Set `scratch` to an absolute workspace scratch directory outside the source checkout.
 
 ```sh
 version=0.1.0
@@ -20,7 +20,11 @@ assets="$scratch/assets"
 scripts/package-release "$version" "$assets"
 ```
 
-This produces Linux, macOS and Windows archives for amd64 and arm64, a shared protocol 6 manifest, a SHA-256 checksum list and a binary detached signature. Each archive includes the provider executable, LICENSE and NOTICE. Both registries discover the same release assets. [Terraform asset and manifest requirements](https://developer.hashicorp.com/terraform/registry/providers/publishing#manually-preparing-a-release), [OpenTofu artifact discovery](https://github.com/opentofu/registry/blob/main/src/internal/provider/version.go)
+This produces Linux, macOS and Windows archives for amd64 and arm64, a shared protocol 6 manifest, a SHA-256 checksum list and a binary detached signature. Each archive includes the provider executable, `LICENSE`, `NOTICE`, and `third-party/` with the build inventory and upstream legal files. The inventory records the exact source commit, Go version, and module versions. Packaging checks each binary's module metadata against the corresponding target's Go dependency list. It copies license, copyright, and notice files from the selected package directories, their ancestors, and the Go and module roots. `NOTICE` also preserves third-party terms found only in dependency source headers. Both registries discover the same release assets. [Terraform asset and manifest requirements](https://developer.hashicorp.com/terraform/registry/providers/publishing#manually-preparing-a-release), [OpenTofu artifact discovery](https://github.com/opentofu/registry/blob/main/src/internal/provider/version.go)
+
+When changing the Go toolchain or dependency versions, audit the dependency list with `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go list -deps -mod=readonly .` for each of the six targets. Inspect the selected upstream sources for additional attribution and license requirements and update `NOTICE` as needed. Keep the audited toolchain setting in `scripts/package-release` in sync with any toolchain change.
+
+Build twice from the same commit with the same Go and Python/zlib versions to compare the ZIPs and SHA256SUMS byte for byte. GPG signatures carry a signing timestamp. For each ZIP, check `third-party/dependencies.txt` against `go version -m` on its extracted binary and confirm the upstream texts are present.
 
 Verify with a keyring containing only the expected public key. Check its fingerprint against the release owner's record. For a pre-publication rehearsal, use a disposable signing key located outside the source checkout.
 

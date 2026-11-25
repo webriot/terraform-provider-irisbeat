@@ -78,11 +78,23 @@ type endpoint[T any] struct {
 	path, label, missingMessage, invalidConfig string
 	missing                                    error
 	valid                                      func(T, string) bool
+	classify                                   func(*http.Response) error
 }
 
 var monitors = endpoint[Monitor]{
 	path: "/api/v1/monitors", label: "Monitor", missingMessage: "Monitor not found", missing: ErrMonitorMissing,
 	invalidConfig: "Check the target, schedule, timing, installation check floor, and destination IDs",
+	classify: func(resp *http.Response) error {
+		if resp.StatusCode == http.StatusBadRequest {
+			var payload struct {
+				Code string `json:"code"`
+			}
+			if decode(resp.Body, &payload) && payload.Code == "destination_pending_confirmation" {
+				return errors.New("an email destination is awaiting confirmation. Ask the recipient to confirm the address, then reapply.")
+			}
+		}
+		return nil
+	},
 	valid: func(m Monitor, id string) bool {
 		return m.ID != "" && (id == "" || m.ID == id) && m.Name != "" &&
 			m.Kind != "" && m.Published != nil && m.DestinationIDs != nil &&
@@ -138,7 +150,7 @@ func create[T any](ctx context.Context, c *Client, ep endpoint[T], fields map[st
 		}
 		if !retry {
 			if uncertain {
-				return zero, unknown
+				return zero, fmt.Errorf("%w\n\nThe %w", err, unknown)
 			}
 			return zero, err
 		}
@@ -239,35 +251,17 @@ func decode(body io.Reader, value any) bool {
 }
 
 func responseError[T any](resp *http.Response, resource bool, ep endpoint[T]) error {
+	if err := ep.classify(resp); err != nil {
+		return err
+	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
 		return errors.New("Irisbeat rejected the API key as invalid, expired, or revoked")
 	case http.StatusForbidden:
 		return errors.New("the API key has insufficient permission. Use an Irisbeat Write API key")
 	case http.StatusBadRequest:
-		if ep.path == monitors.path {
-			var payload struct {
-				Code string `json:"code"`
-			}
-			if decode(resp.Body, &payload) && payload.Code == "destination_pending_confirmation" {
-				return errors.New("an email destination is awaiting confirmation. Ask the recipient to confirm the address, then reapply.")
-			}
-		}
 		return fmt.Errorf("Irisbeat rejected the %s configuration. %s", ep.label, ep.invalidConfig)
 	case http.StatusConflict:
-		if ep.path == destinations.path {
-			var payload struct {
-				Error string `json:"error"`
-			}
-			if decode(resp.Body, &payload) {
-				switch payload.Error {
-				case "A destination with this name already exists":
-					return errors.New("Irisbeat reported a conflict. A destination with this name already exists. Choose a distinct name or import the existing destination")
-				case "This inbox is already a destination":
-					return errors.New("Irisbeat reported a conflict. This inbox is already a destination. Choose a distinct inbox or import the existing destination")
-				}
-			}
-		}
 		return errors.New("Irisbeat reported a conflict. Check the installation before trying again")
 	case http.StatusNotFound:
 		mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))

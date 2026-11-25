@@ -160,7 +160,9 @@ resource "irisbeat_notification_destination" "alerts_email" {
 
 The computed `confirmed` field starts at `false` for a new inbox. After the recipient opens the confirmation link and submits the form, refresh with `terraform apply -refresh-only` or `tofu apply -refresh-only`. The field is `null` for webhooks.
 
-Use the same ID import workflow as for a webhook. Import reads the saved address and confirmation state. Both CLIs hide the address in routine output and store it in plan and state files. Irisbeat trims the address, lowercases the domain, and preserves local-part case. An equivalent address produces an empty plan. Renaming preserves the destination ID. Changing the channel or saved address replaces the destination. If the email address is unknown during planning, the same apply guidance as for a computed webhook URL applies.
+Use the same ID import workflow as for a webhook. Import reads the saved address and confirmation state. Both CLIs hide the address in routine output and store it in plan and state files. Irisbeat trims the address, lowercases the domain, and preserves local-part case. An equivalent address produces an empty plan. Renaming preserves the destination ID. Changing the channel or saved address replaces the destination. For same-channel updates, the computed webhook URL guidance also applies to email addresses.
+
+When changing channels in either direction, the plan must know the new address and that the other address is unset. Apply any upstream address dependencies separately, then run a fresh plan for the channel change.
 
 ### Switch inboxes without interrupting routing
 
