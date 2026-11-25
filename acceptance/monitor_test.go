@@ -198,6 +198,8 @@ resource "irisbeat_monitor" "test" {
 	w.run(0, "import", noColor, address, id)
 	assertFields(t, w.monitor(), map[string]any{"id": id, "name": "HTTP acceptance", "url": "https://example.com/"})
 
+	w.run(0, "plan", "-detailed-exitcode", noColor)
+
 	installationRequest(t, http.MethodPatch, baseURL+"/api/operator/monitors/"+id, operatorSecret,
 		`{"url":"https://example.com/operator","published":true,"intervalSeconds":300}`, http.StatusOK)
 	w.run(0, "apply", "-refresh-only", apply, noColor)
@@ -213,6 +215,9 @@ resource "irisbeat_monitor" "test" {
 		"id": id, "url": "https://example.com/updated", "published": false, "intervalSeconds": float64(300),
 		"scheduleMode": "calendar", "cron": "0 * * * *", "timezone": "UTC",
 	})
+	w.run(0, "plan", "-detailed-exitcode", noColor)
+	w.run(0, "state", "rm", address)
+	w.run(0, "import", noColor, address, id)
 	w.run(0, "plan", "-detailed-exitcode", noColor)
 	config("https://example.com/updated", true, `
   schedule_mode    = "interval"
@@ -290,13 +295,14 @@ provider "irisbeat" {
 }
 resource "irisbeat_monitor" "test" {
   provider  = irisbeat.other
-  name      = "HTTP acceptance"
+  name      = " HTTP acceptance "
   kind      = "http"
-  url       = "https://example.com/"
+  url       = "https://EXAMPLE.com:443#fragment"
   published = true
 }
 `, alias.URL, aliasKey))
 	w.run(0, "import", noColor, address, id)
+	w.run(0, "plan", "-detailed-exitcode", noColor)
 
 	for _, failure := range []struct {
 		status   int

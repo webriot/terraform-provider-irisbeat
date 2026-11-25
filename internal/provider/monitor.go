@@ -96,6 +96,43 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	}
 }
 
+// An import has no configuration, so it records the server's canonical spelling.
+// Keep that state when every configured field already describes the saved Monitor.
+func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var config, prior types.Object
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	savedFields := prior.Attributes()
+	for name, desired := range config.Attributes() {
+		saved := savedFields[name]
+		if desired.IsNull() || desired.Equal(saved) {
+			continue
+		}
+		var normalize func(string) string
+		switch name {
+		case "name":
+			normalize = trimJS
+		case "url":
+			normalize = normalizeURL
+		case "cron":
+			normalize = normalizeCron
+		default:
+			return
+		}
+		if desired.IsUnknown() || saved.IsNull() || saved.IsUnknown() ||
+			normalize(desired.(types.String).ValueString()) != normalize(saved.(types.String).ValueString()) {
+			return
+		}
+	}
+	resp.Plan.Raw = req.State.Raw
+}
+
 func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan monitorModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -229,9 +266,7 @@ func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics
 		FailureThreshold: types.Int64Value(m.FailureThreshold), RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
 	}
 	if m.ScheduleMode == "calendar" {
-		state.Cron = equivalentString(m.Cron, reference.Cron, func(cron string) string {
-			return strings.Join(strings.FieldsFunc(cron, jsWhitespace), " ")
-		})
+		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)
 		state.Timezone = types.StringValue(m.Timezone)
 	}
 	return state, true
@@ -243,6 +278,10 @@ func equivalentString(saved string, reference types.String, normalize func(strin
 		return reference
 	}
 	return types.StringValue(saved)
+}
+
+func normalizeCron(value string) string {
+	return strings.Join(strings.FieldsFunc(value, jsWhitespace), " ")
 }
 
 func trimJS(value string) string { return strings.TrimFunc(value, jsWhitespace) }
