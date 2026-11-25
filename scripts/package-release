@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+set -euo pipefail
+
+if [[ $# != 2 ]] || [[ ! $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "Usage: RELEASE_SIGNING_FINGERPRINT=<GPG fingerprint> $0 <version without v> <new output directory>" >&2
+  exit 2
+fi
+
+version=$1
+: "${RELEASE_SIGNING_FINGERPRINT:?Set the fingerprint for the release signing key}"
+if [[ ! $RELEASE_SIGNING_FINGERPRINT =~ ^[[:xdigit:]]{40}$ ]]; then
+  echo "Use the full fingerprint of the RSA OpenPGP key." >&2
+  exit 2
+fi
+
+source_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+revision=$(git -C "$source_root" rev-parse HEAD)
+# Refuse a signing key that the local GPG agent cannot access.
+gpg --list-secret-keys "$RELEASE_SIGNING_FINGERPRINT" >/dev/null
+mkdir -- "$2"
+output=$(cd -- "$2" && pwd)
+build=$(mktemp -d "$output/.build.XXXXXX")
+trap 'rm -rf -- "$build"' EXIT
+
+# Build only the committed files, even when local development files are present.
+git -C "$source_root" archive "$revision" | tar -xf - -C "$build"
+cd -- "$build"
+name=terraform-provider-irisbeat
+prefix="${name}_${version}"
+manifest="${prefix}_manifest.json"
+sums="${prefix}_SHA256SUMS"
+cp -- terraform-registry-manifest.json "$manifest"
+
+for os in linux darwin windows; do
+  for arch in amd64 arm64; do
+    binary="${name}_v${version}"
+    if [[ $os == windows ]]; then
+      binary+=".exe"
+    fi
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -mod=readonly -trimpath -buildvcs=false \
+      -ldflags="-X main.version=$version" -o "$binary" .
+    python3 -m zipfile -c "${prefix}_${os}_${arch}.zip" "$binary" LICENSE NOTICE
+    rm -- "$binary"
+  done
+done
+
+sha256sum -- "${prefix}"_*.zip "$manifest" > "$sums"
+gpg --no-armor --local-user "$RELEASE_SIGNING_FINGERPRINT" --output "$sums.sig" --detach-sign "$sums"
+gpg --verify "$sums.sig" "$sums"
+sha256sum --check --strict "$sums"
+mv -- "${prefix}"_*.zip "$manifest" "$sums" "$sums.sig" "$output/"
+printf 'Packaged %s from %s in %s\n' "$version" "$revision" "$output"
