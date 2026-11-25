@@ -217,6 +217,7 @@ resource "irisbeat_notification_destination" "test" {
 	}
 	out = w.run(1, "apply", "-no-color", "changed.plan")
 	if !strings.Contains(out, "inconsistent final plan") || !strings.Contains(out, "Update") ||
+		!strings.Contains(strings.Join(strings.Fields(out), " "), "run a fresh plan") ||
 		strings.Contains(out, "computed-webhook-token") || strings.Contains(out, "changed-webhook-token") {
 		t.Fatal("expected the CLI to reject a late replacement without exposing webhook URLs")
 	}

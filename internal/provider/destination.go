@@ -137,6 +137,7 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 	if normalizeWebhookURL(plan.WebhookURL.ValueString()) != normalizeWebhookURL(prior.WebhookURL.ValueString()) {
+		resp.Diagnostics.AddWarning("Webhook URL requires replacement", "If the CLI stops because the URL changed during apply, run a fresh plan and review the destination replacement before applying it.")
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("webhook_url"))
 		return
 	}
