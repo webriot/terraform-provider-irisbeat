@@ -144,10 +144,7 @@ resource "irisbeat_monitor" "test" {
 			w.run(0, "apply", "-auto-approve", "-no-color")
 			id := w.monitor()["id"].(string)
 			endpoint := baseURL + "/api/v1/monitors/" + id
-			t.Cleanup(func() {
-				// Deletion returns 404 if the default replacement already removed it.
-				cleanupMonitor(t, endpoint, key)
-			})
+			cleanupResource(t, endpoint, key)
 			destinationID := installationRequest(t, http.MethodPost, baseURL+"/api/v1/destinations", key,
 				`{"url":"https://example.com/irisbeat-acceptance","name":"HTTP replacement validation"}`, http.StatusCreated)["id"].(string)
 			t.Cleanup(func() {

@@ -82,6 +82,11 @@ func (w cliWorkspace) run(wantExit int, args ...string) string {
 
 func (w cliWorkspace) monitor() map[string]any {
 	w.t.Helper()
+	return w.resourceState(address)
+}
+
+func (w cliWorkspace) resourceState(address string) map[string]any {
+	w.t.Helper()
 	var state struct {
 		Values struct {
 			Root struct {
@@ -100,7 +105,7 @@ func (w cliWorkspace) monitor() map[string]any {
 			return resource.Values
 		}
 	}
-	w.t.Fatal("Monitor is missing from state")
+	w.t.Fatalf("%s is missing from state", address)
 	return nil
 }
 
@@ -131,6 +136,30 @@ func installationRequest(t *testing.T, method, endpoint, key, body string, wantS
 	return result
 }
 
+func cleanupResource(t *testing.T, endpoint, key string) {
+	t.Helper()
+	t.Cleanup(func() {
+		// The API cleanup also covers failures between state removal and re-import.
+		req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		client := http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+			t.Errorf("cleanup status = %d", resp.StatusCode)
+		}
+	})
+}
+
 func assertFields(t *testing.T, actual, expected map[string]any) {
 	t.Helper()
 	for key, want := range expected {
@@ -140,28 +169,6 @@ func assertFields(t *testing.T, actual, expected map[string]any) {
 	}
 	if t.Failed() {
 		t.FailNow()
-	}
-}
-
-func cleanupMonitor(t *testing.T, endpoint, key string) {
-	t.Helper()
-	// The API cleanup also covers failures between state removal and re-import.
-	req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-		t.Errorf("cleanup status = %d", resp.StatusCode)
 	}
 }
 
@@ -189,9 +196,7 @@ resource "irisbeat_monitor" "test" {
 	w.run(0, "apply", apply, noColor)
 	id := w.monitor()["id"].(string)
 	endpoint := baseURL + "/api/v1/monitors/" + id
-	t.Cleanup(func() {
-		cleanupMonitor(t, endpoint, key)
-	})
+	cleanupResource(t, endpoint, key)
 	assertFields(t, installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK), map[string]any{
 		"name": "HTTP acceptance", "url": "https://example.com/", "published": false,
 		"scheduleMode": "interval", "intervalSeconds": float64(120), "timeoutSeconds": float64(10),
