@@ -62,7 +62,7 @@ sha256sum -- "${prefix}"_*.zip "$manifest" > "$sums"
 gpg --no-armor --local-user "$signer!" --output "$sums.sig" --detach-sign "$sums"
 gpg --batch --status-fd=1 --verify "$sums.sig" "$sums" |
   awk -v signer="$signer" -v primary="$primary" '
-    $2 == "VALIDSIG" && $3 == signer && ($10 == 1 || $10 == 3) && $12 == primary { valid = 1 }
+    $2 == "VALIDSIG" && $3 == signer && ($9 == 1 || $9 == 3) && $12 == primary { valid = 1 }
     END { exit !valid }
   '
 sha256sum --check --strict "$sums"
