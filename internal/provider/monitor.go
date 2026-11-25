@@ -16,6 +16,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	whatwg "github.com/nlnwa/whatwg-url/url"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type monitorResource struct{ client *api.Client }
@@ -342,7 +344,8 @@ func normalizeURL(value string) string {
 var ipv6Literal = regexp.MustCompile(`^[0-9a-f:.]+$`)
 
 func normalizeHostname(value string) string {
-	host := strings.ToLower(value)
+	// Irisbeat uses ECMAScript full, locale-independent Unicode lowercasing.
+	host := cases.Lower(language.Und).String(value)
 	if !strings.Contains(host, ":") {
 		return host
 	}
