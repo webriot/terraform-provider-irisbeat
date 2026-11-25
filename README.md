@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP, TCP, and Heartbeat Monitors and webhook Notification destinations on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
+Manage HTTP, TCP, and Heartbeat Monitors and Notification destinations for webhook and email on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
 
 ## Run a local build
 
@@ -105,6 +105,36 @@ When the webhook URL is unknown during planning, the plan keeps the existing des
 
 Run `terraform import irisbeat_notification_destination.alerts <destination-id>` or `tofu import irisbeat_notification_destination.alerts <destination-id>` to adopt an existing webhook. The URL is sensitive in routine CLI output and is stored in plan and state files. If a create ends with an unknown outcome, check Irisbeat and import any existing destination before attempting another create.
 
+## Manage an email Notification destination
+
+[Enable email delivery](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/install.md#optional-email-confirmation) on the installation, then configure an inbox.
+
+```hcl
+variable "alerts_inbox" {
+  type      = string
+  sensitive = true
+}
+
+resource "irisbeat_notification_destination" "alerts_email" {
+  channel       = "email"
+  name          = "Operations email"
+  email_address = var.alerts_inbox
+}
+```
+
+The computed `confirmed` field starts at `false` for a new inbox. After the recipient opens the confirmation link and submits the form, refresh with `terraform apply -refresh-only` or `tofu apply -refresh-only`. The field is `null` for webhooks.
+
+Use the same ID import workflow as for a webhook. Import reads the saved address and confirmation state. Both CLIs hide the address in routine output and store it in plan and state files. Irisbeat trims the address, lowercases the domain, and preserves local-part case. An equivalent address produces an empty plan. Renaming preserves the destination ID. Changing the channel or saved address replaces the destination. If the email address is unknown during planning, the same apply guidance as for a computed webhook URL applies.
+
+### Switch inboxes without interrupting routing
+
+1. Add a second email destination at a separate resource address with a distinct name and inbox. Apply with the original destination still configured and assigned to the Monitor.
+2. Have the new recipient confirm the inbox. Refresh state and check that the new destination has `confirmed = true`.
+3. Replace the original ID in the Monitor's `destination_ids` with the new ID. Keep any other assignments in the set and apply the routing change with both destinations still configured.
+4. Remove the original destination from configuration and apply. Deleting it clears any remaining assignments, including those on Monitors outside this configuration.
+
+If you try assigning a pending inbox, Irisbeat rejects the whole Monitor write and preserves its saved configuration and routing. The new destination remains managed even if both changes were in that apply. Have the recipient confirm the inbox, then reapply the Monitor change.
+
 ## Manage Monitor routing
 
 Add `destination_ids = [irisbeat_notification_destination.alerts.id]` to a Monitor to manage its complete set of Notification destination IDs. Reordering IDs produces an empty plan. Apply repairs changes made in the Operator when an explicit set is configured.
@@ -115,11 +145,13 @@ Irisbeat rejects the entire Monitor write if any selected destination is ineligi
 
 ## Verify
 
-`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors and webhook Notification destinations. To include rejection of pending email assignments, configure [email delivery](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/install.md#optional-email-confirmation) on the disposable installation with a local mail capture binding and set `IRISBEAT_TEST_EMAIL=1`.
+`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors and Notification destinations. For the email lifecycle and cutover tests, configure [email delivery](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/install.md#optional-email-confirmation) with local mail capture. Set `IRISBEAT_TEST_EMAIL=1` and set `IRISBEAT_TEST_MAIL_CAPTURE_URL` to the Miniflare Local Explorer email sending endpoint for the delivery Worker. Set `NOTIFICATION_PUBLIC_ORIGIN` on the monitoring Worker to the same loopback origin as `IRISBEAT_TEST_BASE_URL` so the tests can submit the captured confirmation form.
 
 ```sh
 export IRISBEAT_TEST_BASE_URL=http://127.0.0.1:8787
 export IRISBEAT_TEST_PROVIDER="$provider_dir/terraform-provider-irisbeat"
+export IRISBEAT_TEST_EMAIL=1
+export IRISBEAT_TEST_MAIL_CAPTURE_URL="$IRISBEAT_TEST_BASE_URL/cdn-cgi/local/explorer/api/local/email/sending?worker=irisbeat-delivery"
 IRISBEAT_TEST_CLI="$(command -v terraform)" go test ./acceptance -count=1 -v
 IRISBEAT_TEST_CLI="$(command -v tofu)" go test ./acceptance -count=1 -v
 ```
