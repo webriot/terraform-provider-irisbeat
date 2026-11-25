@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
+Manage HTTP and Heartbeat Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
 
 ## Run a local build
 
@@ -41,13 +41,35 @@ resource "irisbeat_monitor" "website" {
 }
 ```
 
-Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
+Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` for HTTP Monitors in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
 
 To adopt a Monitor, declare its matching saved configuration and run `terraform import irisbeat_monitor.website <monitor-id>` or `tofu import irisbeat_monitor.website <monitor-id>` using its ID from the same installation. If an interrupted create leaves the outcome unknown, check Irisbeat and import any existing Monitor before attempting another create.
 
+## Heartbeat Monitors
+
+```hcl
+resource "irisbeat_monitor" "nightly_job" {
+  name          = "Nightly job"
+  kind          = "heartbeat"
+  published     = false
+  schedule_mode = "calendar"
+  cron          = "0 2 * * *"
+  timezone      = "UTC"
+  grace_seconds = 300
+}
+
+output "nightly_job_receipt_path" {
+  value = irisbeat_monitor.nightly_job.heartbeat_path
+}
+```
+
+For Interval mode, omit the Calendar fields and set `schedule_mode = "interval"`, or omit the mode when creating a Monitor. Interval Heartbeats support `interval_seconds`, `silence_seconds`, and `recovery_spacing_seconds`. Both modes support `recovery_threshold`. Irisbeat supplies omitted timing defaults on create. Schedule changes preserve the Monitor ID. Changing kind replaces the Monitor.
+
+Configure the job to send an HTTPS POST to the installation URL plus `heartbeat_path`. Set the installation secret in the job's secret store and send it as the Bearer credential. See the [Heartbeat receipt API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/heartbeat-api.md#send-a-receipt).
+
 ## Verify
 
-`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete a Monitor.
+`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors.
 
 ```sh
 export IRISBEAT_TEST_BASE_URL=http://127.0.0.1:8787

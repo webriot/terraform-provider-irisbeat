@@ -67,6 +67,10 @@ type Monitor struct {
 	RecoveryThreshold int64  `json:"recoveryThreshold"`
 	Cron              string `json:"cron"`
 	Timezone          string `json:"timezone"`
+
+	SilenceSeconds         int64 `json:"silenceSeconds"`
+	RecoverySpacingSeconds int64 `json:"recoverySpacingSeconds"`
+	GraceSeconds           int64 `json:"graceSeconds"`
 }
 
 func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Monitor, error) {
@@ -82,13 +86,17 @@ func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Moni
 	defer cancel()
 
 	idempotencyKey := hex.EncodeToString(key)
+	kind := "http"
+	if requested, ok := fields["kind"].(string); ok {
+		kind = requested
+	}
 	uncertain := false
 	for attempt := 0; attempt < 3; attempt++ {
 		monitor, retry, err := c.request(ctx, http.MethodPost, "", idempotencyKey, body, http.StatusCreated)
-		if err == nil && monitor.Kind == "http" {
+		if err == nil && monitor.Kind == kind {
 			return monitor, nil
 		}
-		// This client creates HTTP Monitors. A mismatched success cannot confirm the write.
+		// A mismatched success cannot confirm the write.
 		if err == nil {
 			retry = true
 		}
@@ -169,7 +177,8 @@ func (c *Client) request(ctx context.Context, method, id, key string, body []byt
 	var monitor Monitor
 	if !decode(resp.Body, &monitor) || monitor.ID == "" || (id != "" && monitor.ID != id) ||
 		monitor.Name == "" || monitor.Kind == "" || monitor.Published == nil ||
-		(monitor.Kind == "http" && !validHTTPMonitor(monitor)) {
+		(monitor.Kind == "http" && !validHTTPMonitor(monitor)) ||
+		(monitor.Kind == "heartbeat" && !validHeartbeatMonitor(monitor)) {
 		return Monitor{}, true, errUnexpected
 	}
 	return monitor, false, nil
@@ -180,6 +189,20 @@ func validHTTPMonitor(m Monitor) bool {
 		return false
 	}
 	return m.ScheduleMode == "interval" || (m.ScheduleMode == "calendar" && m.Cron != "" && m.Timezone != "")
+}
+
+func validHeartbeatMonitor(m Monitor) bool {
+	if m.RecoveryThreshold < 1 {
+		return false
+	}
+	switch m.ScheduleMode {
+	case "interval":
+		return m.IntervalSeconds > 0 && m.SilenceSeconds > 0 && m.RecoverySpacingSeconds > 0
+	case "calendar":
+		return m.Cron != "" && m.Timezone != "" && m.GraceSeconds > 0
+	default:
+		return false
+	}
 }
 
 func decode(body io.Reader, value any) bool {

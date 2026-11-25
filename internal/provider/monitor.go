@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
@@ -32,6 +33,11 @@ type monitorModel struct {
 	RecoveryThreshold types.Int64  `tfsdk:"recovery_threshold"`
 	Cron              types.String `tfsdk:"cron"`
 	Timezone          types.String `tfsdk:"timezone"`
+
+	HeartbeatPath          types.String `tfsdk:"heartbeat_path"`
+	SilenceSeconds         types.Int64  `tfsdk:"silence_seconds"`
+	RecoverySpacingSeconds types.Int64  `tfsdk:"recovery_spacing_seconds"`
+	GraceSeconds           types.Int64  `tfsdk:"grace_seconds"`
 }
 
 func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -39,19 +45,24 @@ func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataReque
 }
 
 func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	resp.Schema = schema.Schema{Description: "Manages an Irisbeat HTTP Monitor.", Attributes: map[string]schema.Attribute{
+	resp.Schema = schema.Schema{Description: "Manages an Irisbeat Monitor.", Attributes: map[string]schema.Attribute{
 		"id":                 schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Opaque Irisbeat Monitor ID."},
 		"name":               schema.StringAttribute{Required: true, Description: "Monitor name."},
-		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http."},
-		"url":                schema.StringAttribute{Required: true, Description: "HTTP or HTTPS check target."},
+		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http or heartbeat."},
+		"url":                schema.StringAttribute{Optional: true, Description: "HTTP or HTTPS check target. Required for HTTP Monitors."},
 		"published":          schema.BoolAttribute{Required: true, Description: "Whether the Monitor appears on the public status page."},
 		"schedule_mode":      schema.StringAttribute{Optional: true, Computed: true, Description: "interval or calendar. New Monitors default to interval."},
-		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Outbound check interval, retained when scheduling in Calendar mode."},
+		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Check interval or expected Heartbeat receipt interval in seconds. HTTP Monitors retain it in Calendar mode."},
 		"timeout_seconds":    schema.Int64Attribute{Optional: true, Computed: true, Description: "Check timeout in seconds."},
 		"failure_threshold":  schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive failures required to open an Incident."},
 		"recovery_threshold": schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive successes required to resolve an Incident."},
 		"cron":               schema.StringAttribute{Optional: true, Computed: true, Description: "Numeric five-field cron expression for Calendar scheduling."},
 		"timezone":           schema.StringAttribute{Optional: true, Computed: true, Description: "Named Calendar timezone. Defaults to UTC when entering Calendar mode."},
+
+		"heartbeat_path":           schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Heartbeat receipt path for the saved Monitor ID. Authenticate receipts with the installation secret."},
+		"silence_seconds":          schema.Int64Attribute{Optional: true, Computed: true, Description: "Seconds without a receipt before an Interval Heartbeat opens an Incident."},
+		"recovery_spacing_seconds": schema.Int64Attribute{Optional: true, Computed: true, Description: "Minimum seconds between qualifying Interval Heartbeat recovery receipts."},
+		"grace_seconds":            schema.Int64Attribute{Optional: true, Computed: true, Description: "Seconds after a scheduled Calendar Heartbeat occurrence to accept a receipt."},
 	}}
 }
 
@@ -73,18 +84,39 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if !config.Kind.IsNull() && !config.Kind.IsUnknown() && config.Kind.ValueString() != "http" {
-		resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http for the Monitor kind.")
+	switch config.Kind.ValueString() {
+	case "http":
+		if config.URL.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("url"), "Missing HTTP target", "Configure url for an HTTP Monitor.")
+		}
+		if !config.SilenceSeconds.IsNull() || !config.RecoverySpacingSeconds.IsNull() || !config.GraceSeconds.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
+		}
+	case "heartbeat":
+		if !config.URL.IsNull() || !config.TimeoutSeconds.IsNull() || !config.FailureThreshold.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("kind"), "HTTP kind required", "Configure url, timeout_seconds, or failure_threshold only for HTTP Monitors.")
+		}
+	default:
+		if !config.Kind.IsNull() && !config.Kind.IsUnknown() {
+			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or heartbeat for the Monitor kind.")
+		}
 	}
 	if config.ScheduleMode.IsUnknown() {
 		return
 	}
 	switch config.ScheduleMode.ValueString() {
 	case "calendar":
+		if config.Kind.ValueString() == "heartbeat" &&
+			(!config.IntervalSeconds.IsNull() || !config.SilenceSeconds.IsNull() || !config.RecoverySpacingSeconds.IsNull()) {
+			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Interval mode required", "Configure interval_seconds, silence_seconds, or recovery_spacing_seconds only for Interval Heartbeats.")
+		}
 		if config.Cron.IsNull() {
 			resp.Diagnostics.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
 		}
 	case "", "interval":
+		if !config.GraceSeconds.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("grace_seconds"), "Calendar mode required", "Set schedule_mode to calendar to configure grace_seconds.")
+		}
 		if !config.Cron.IsNull() || !config.Timezone.IsNull() {
 			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
 		}
@@ -245,6 +277,9 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 		{"timeoutSeconds", desired.TimeoutSeconds, prior.TimeoutSeconds},
 		{"failureThreshold", desired.FailureThreshold, prior.FailureThreshold},
 		{"recoveryThreshold", desired.RecoveryThreshold, prior.RecoveryThreshold},
+		{"silenceSeconds", desired.SilenceSeconds, prior.SilenceSeconds},
+		{"recoverySpacingSeconds", desired.RecoverySpacingSeconds, prior.RecoverySpacingSeconds},
+		{"graceSeconds", desired.GraceSeconds, prior.GraceSeconds},
 	} {
 		if !field.value.IsUnknown() && !field.value.IsNull() && !field.value.Equal(field.old) {
 			fields[field.key] = field.value.ValueInt64()
@@ -254,16 +289,30 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 }
 
 func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
-	if m.Kind != "http" {
-		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP Monitors.")
+	if m.Kind != "http" && m.Kind != "heartbeat" {
+		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP and Heartbeat Monitors.")
 		return monitorModel{}, false
 	}
 	state := monitorModel{
 		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, trimJS),
-		Kind: types.StringValue(m.Kind), URL: equivalentString(m.URL, reference.URL, normalizeURL),
+		Kind:      types.StringValue(m.Kind),
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
-		IntervalSeconds: types.Int64Value(m.IntervalSeconds), TimeoutSeconds: types.Int64Value(m.TimeoutSeconds),
-		FailureThreshold: types.Int64Value(m.FailureThreshold), RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
+		RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
+	}
+	if m.Kind == "http" {
+		state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
+		state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
+		state.TimeoutSeconds = types.Int64Value(m.TimeoutSeconds)
+		state.FailureThreshold = types.Int64Value(m.FailureThreshold)
+	} else {
+		state.HeartbeatPath = types.StringValue("/heartbeat/" + url.PathEscape(m.ID))
+		if m.ScheduleMode == "calendar" {
+			state.GraceSeconds = types.Int64Value(m.GraceSeconds)
+		} else {
+			state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
+			state.SilenceSeconds = types.Int64Value(m.SilenceSeconds)
+			state.RecoverySpacingSeconds = types.Int64Value(m.RecoverySpacingSeconds)
+		}
 	}
 	if m.ScheduleMode == "calendar" {
 		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)
