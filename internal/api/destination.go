@@ -22,6 +22,22 @@ var destinations = endpoint[Destination]{
 	path: "/api/v1/destinations", label: "Notification destination",
 	missingMessage: "Destination not found", missing: ErrDestinationMissing,
 	invalidConfig: "Check the name and channel address",
+	classify: func(resp *http.Response) error {
+		if resp.StatusCode == http.StatusConflict {
+			var payload struct {
+				Error string `json:"error"`
+			}
+			if decode(resp.Body, &payload) {
+				switch payload.Error {
+				case "A destination with this name already exists":
+					return errors.New("Irisbeat reported a conflict. A destination with this name already exists. Choose a distinct name or import the existing destination")
+				case "This inbox is already a destination":
+					return errors.New("Irisbeat reported a conflict. This inbox is already a destination. Choose a distinct inbox or import the existing destination")
+				}
+			}
+		}
+		return nil
+	},
 	valid: func(d Destination, id string) bool {
 		if d.ID == "" || (id != "" && d.ID != id) || d.Name == "" {
 			return false

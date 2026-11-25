@@ -70,6 +70,18 @@ resource "irisbeat_notification_destination" "test" {
 	w.run(0, "plan", "-detailed-exitcode", "-no-color")
 
 	monitorEndpoint := assignedMonitor(t, baseURL, key, id)
+	w.config(`
+resource "irisbeat_notification_destination" "test" {
+  channel = "email"
+}
+`)
+	if out := w.run(1, "plan", "-detailed-exitcode", "-no-color"); !strings.Contains(out, "Invalid Irisbeat email address") {
+		t.Fatal("expected planning to reject the missing email address")
+	}
+	assertFields(t, w.resourceState(destinationAddress), map[string]any{"id": id, "channel": "webhook"})
+	installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK)
+	assertAssignment(t, monitorEndpoint, key, id)
+
 	for _, url := range []string{
 		strings.Replace(original, "https:", "http:", 1),
 		"https://[bad]/acceptance-token",

@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf16"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -99,7 +98,7 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	validateMonitorConfig(config, &resp.Diagnostics)
 }
 
-func configured(value attr.Value) bool {
+func isKnownNonNull(value attr.Value) bool {
 	return !value.IsNull() && !value.IsUnknown()
 }
 
@@ -115,38 +114,38 @@ func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
 	case "http":
 		validateHTTPTarget(config.URL, diags)
 	case "tcp":
-		if config.Hostname.IsNull() || (configured(config.Hostname) && config.Hostname.ValueString() == "") {
+		if config.Hostname.IsNull() || (isKnownNonNull(config.Hostname) && config.Hostname.ValueString() == "") {
 			diags.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
 		}
 		if config.Port.IsNull() {
 			diags.AddAttributeError(path.Root("port"), "Missing TCP port", "TCP Monitors require port.")
-		} else if configured(config.Port) && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
+		} else if isKnownNonNull(config.Port) && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
 			diags.AddAttributeError(path.Root("port"), "Invalid TCP port", "Use an integer from 1 to 65535.")
 		}
 	case "heartbeat":
-		if configured(config.TimeoutSeconds) || configured(config.FailureThreshold) {
+		if isKnownNonNull(config.TimeoutSeconds) || isKnownNonNull(config.FailureThreshold) {
 			diags.AddAttributeError(path.Root("kind"), "Outbound Monitor kind required", "Configure timeout_seconds or failure_threshold only for HTTP or TCP Monitors.")
 		}
 	default:
-		if configured(config.Kind) {
+		if isKnownNonNull(config.Kind) {
 			diags.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http, tcp, or heartbeat for the Monitor kind.")
 		}
 	}
 	if kind == "tcp" || kind == "heartbeat" {
-		if configured(config.URL) {
+		if isKnownNonNull(config.URL) {
 			diags.AddAttributeError(path.Root("url"), "HTTP kind required", "url is only available for HTTP Monitors.")
 		}
 	}
 	if kind == "http" || kind == "heartbeat" {
-		if configured(config.Hostname) {
+		if isKnownNonNull(config.Hostname) {
 			diags.AddAttributeError(path.Root("hostname"), "TCP kind required", "hostname is only available for TCP Monitors.")
 		}
-		if configured(config.Port) {
+		if isKnownNonNull(config.Port) {
 			diags.AddAttributeError(path.Root("port"), "TCP kind required", "port is only available for TCP Monitors.")
 		}
 	}
 	if kind == "http" || kind == "tcp" {
-		if configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds) || configured(config.GraceSeconds) {
+		if isKnownNonNull(config.SilenceSeconds) || isKnownNonNull(config.RecoverySpacingSeconds) || isKnownNonNull(config.GraceSeconds) {
 			diags.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
 		}
 	}
@@ -156,17 +155,17 @@ func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
 	switch config.ScheduleMode.ValueString() {
 	case "calendar":
 		if config.Kind.ValueString() == "heartbeat" &&
-			(configured(config.IntervalSeconds) || configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds)) {
+			(isKnownNonNull(config.IntervalSeconds) || isKnownNonNull(config.SilenceSeconds) || isKnownNonNull(config.RecoverySpacingSeconds)) {
 			diags.AddAttributeError(path.Root("schedule_mode"), "Interval mode required", "Configure interval_seconds, silence_seconds, or recovery_spacing_seconds only for Interval Heartbeats.")
 		}
 		if config.Cron.IsNull() {
 			diags.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
 		}
 	case "", "interval":
-		if configured(config.GraceSeconds) {
+		if isKnownNonNull(config.GraceSeconds) {
 			diags.AddAttributeError(path.Root("grace_seconds"), "Calendar mode required", "Set schedule_mode to calendar to configure grace_seconds.")
 		}
-		if configured(config.Cron) || configured(config.Timezone) {
+		if isKnownNonNull(config.Cron) || isKnownNonNull(config.Timezone) {
 			diags.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
 		}
 		if !config.ScheduleMode.IsNull() && config.ScheduleMode.ValueString() == "" {
@@ -188,7 +187,7 @@ func validateHTTPTarget(target types.String, diags *diag.Diagnostics) {
 	value := target.ValueString()
 	parsed, err := whatwg.Parse(value)
 	if err != nil || (parsed.Scheme() != "http" && parsed.Scheme() != "https") ||
-		parsed.Username() != "" || parsed.Password() != "" || len(utf16.Encode([]rune(value))) > 2048 {
+		parsed.Username() != "" || parsed.Password() != "" || utf16Length(value) > 2048 {
 		diags.AddAttributeError(path.Root("url"), "Invalid HTTP target",
 			"Use an HTTP or HTTPS URL without embedded credentials and with at most 2,048 UTF-16 code units.")
 	}
@@ -212,7 +211,7 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		}
 	}
 	if desiredFields["kind"].Equal(types.StringValue("heartbeat")) && desiredFields["schedule_mode"].IsNull() &&
-		(configured(desiredFields["interval_seconds"]) || configured(desiredFields["silence_seconds"]) || configured(desiredFields["recovery_spacing_seconds"])) {
+		(isKnownNonNull(desiredFields["interval_seconds"]) || isKnownNonNull(desiredFields["silence_seconds"]) || isKnownNonNull(desiredFields["recovery_spacing_seconds"])) {
 		interval := types.StringValue("interval")
 		desiredFields["schedule_mode"] = interval
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("schedule_mode"), interval)...)
@@ -248,20 +247,8 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		if desired.IsNull() || desired.Equal(saved) {
 			continue
 		}
-		var normalize func(string) string
-		switch name {
-		case "name":
-			normalize = trimJS
-		case "url":
-			normalize = normalizeURL
-		case "hostname":
-			normalize = normalizeHostname
-		case "cron":
-			normalize = normalizeCron
-		default:
-			return
-		}
-		if desired.IsUnknown() || saved.IsNull() || saved.IsUnknown() ||
+		normalize := monitorNormalizers[name]
+		if normalize == nil || !isKnownNonNull(desired) || !isKnownNonNull(saved) ||
 			normalize(desired.(types.String).ValueString()) != normalize(saved.(types.String).ValueString()) {
 			return
 		}
@@ -425,7 +412,7 @@ func monitorState(ctx context.Context, m api.Monitor, reference monitorModel, di
 	destinationIDs, setDiags := types.SetValueFrom(ctx, types.StringType, m.DestinationIDs)
 	diags.Append(setDiags...)
 	state := monitorModel{
-		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, trimJS),
+		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, monitorNormalizers["name"]),
 		Kind:      types.StringValue(m.Kind),
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
 		RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
@@ -445,22 +432,29 @@ func monitorState(ctx context.Context, m api.Monitor, reference monitorModel, di
 		state.TimeoutSeconds = types.Int64Value(m.TimeoutSeconds)
 		state.FailureThreshold = types.Int64Value(m.FailureThreshold)
 		if m.Kind == "tcp" {
-			state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
+			state.Hostname = equivalentString(m.Hostname, reference.Hostname, monitorNormalizers["hostname"])
 			state.Port = types.Int64Value(m.Port)
 		} else {
-			state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
+			state.URL = equivalentString(m.URL, reference.URL, monitorNormalizers["url"])
 		}
 	}
 	if m.ScheduleMode == "calendar" {
-		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)
+		state.Cron = equivalentString(m.Cron, reference.Cron, monitorNormalizers["cron"])
 		state.Timezone = types.StringValue(m.Timezone)
 	}
 	return state, !diags.HasError()
 }
 
+var monitorNormalizers = map[string]func(string) string{
+	"name":     trimJS,
+	"url":      normalizeURL,
+	"hostname": normalizeHostname,
+	"cron":     normalizeCron,
+}
+
 func equivalentString(saved string, reference types.String, normalize func(string) string) types.String {
 	// Keep the planned spelling when Irisbeat saved an equivalent value.
-	if !reference.IsNull() && !reference.IsUnknown() && normalize(reference.ValueString()) == saved {
+	if isKnownNonNull(reference) && normalize(reference.ValueString()) == saved {
 		return reference
 	}
 	return types.StringValue(saved)

@@ -147,7 +147,7 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 				resp.Diagnostics.AddError("Invalid Irisbeat email address", "Use one email mailbox of at most 254 characters.")
 				return
 			}
-		} else if !address.Equal(priorAddress) {
+		} else if address.IsNull() || !address.Equal(priorAddress) {
 			// A saved Discord URL can exceed the input limit after normalization.
 			if _, valid := parseWebhookURL(value); !valid || utf16Length(value) > 2048 {
 				// Attribute diagnostics may display the URL literal in a source excerpt.
