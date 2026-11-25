@@ -2,6 +2,33 @@
 
 Manage HTTP, TCP, and Heartbeat Monitors and Notification destinations for webhook and email on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
 
+## Compatibility
+
+| Component | Tested minimum |
+| --- | --- |
+| Irisbeat (self-hosted) | v0.5.0 |
+| Terraform | v1.14.0 |
+| OpenTofu | v1.12.5 |
+
+## Install from a registry
+
+After the provider is published, declare it in your root module and run `terraform init` or `tofu init`. The short source address resolves through each CLI's own public registry.
+
+```hcl
+terraform {
+  required_providers {
+    irisbeat = {
+      source  = "webriot/irisbeat"
+      version = "~> 0.1.0"
+    }
+  }
+}
+```
+
+Issue an installation-scoped Write API key. Send the installation secret as the Bearer credential to [`POST /api/operator/api-keys`](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md#issue-a-key) with the JSON body `{"name":"Infrastructure","role":"write"}`. Save the returned `secret` in your secret store. Set `IRISBEAT_BASE_URL` to the installation origin, and inject that Write key as `IRISBEAT_API_KEY`. An explicit `base_url` or sensitive `api_key` takes precedence over its environment variable. Use provider aliases with their own URL and key for additional installations.
+
+Save plan and state files in protected storage with limited access. Both CLIs can retain sensitive addresses in those files and expose values in machine-readable output. See [Terraform sensitive data](https://developer.hashicorp.com/terraform/language/manage-sensitive-data) and [OpenTofu sensitive data](https://opentofu.org/docs/language/state/sensitive-data/).
+
 ## Run a local build
 
 Build with Go 1.25 or later. The same binary serves plugin protocol 6 to both CLIs.
@@ -20,9 +47,9 @@ provider_installation {
 EOF_CONFIG
 ```
 
-Issue an [installation-scoped Write API key](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md#key-administration) in Irisbeat. Set `IRISBEAT_BASE_URL` to the installation URL and inject the key as `IRISBEAT_API_KEY`. An explicit `base_url` or sensitive `api_key` takes precedence over its environment variable. Use provider aliases with their own URL and key for additional installations.
+In a separate directory, save this configuration as `main.tf` and run `terraform plan` or `tofu plan` using the override and the same Write API key setup. The override loads the local binary directly and skips `init`.
 
-In a separate directory, save this configuration as `main.tf` and run `terraform plan` or `tofu plan` using the override. The override loads the local binary directly, so you can run the workflow without `init`.
+## Manage Monitors
 
 ```hcl
 terraform {
@@ -83,7 +110,16 @@ output "nightly_job_receipt_path" {
 
 For Interval mode, omit the Calendar fields and set `schedule_mode = "interval"`, or omit the mode when creating a Monitor. Declaring `interval_seconds`, `silence_seconds`, or `recovery_spacing_seconds` implies Interval mode when `schedule_mode` is omitted. Both modes support `recovery_threshold`. Irisbeat supplies omitted timing defaults on create. Schedule changes preserve the Monitor ID. Changing kind replaces the Monitor.
 
-Configure the job to send an HTTPS POST to the installation URL plus `heartbeat_path`. Set the installation secret in the job's secret store and send it as the Bearer credential. See the [Heartbeat receipt API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/heartbeat-api.md#send-a-receipt).
+Configure the job to send an HTTPS POST to the installation URL plus `heartbeat_path`. Set the installation secret in the job's secret store and send it as the Bearer credential. For example, inject `IRISBEAT_HEARTBEAT_PATH` from the output above and set `IRISBEAT_INSTALLATION_SECRET` in the job's secret store.
+
+```sh
+curl --fail --silent --show-error --request POST \
+  --header @- "${IRISBEAT_BASE_URL}${IRISBEAT_HEARTBEAT_PATH}" <<EOF_HEADER
+Authorization: Bearer ${IRISBEAT_INSTALLATION_SECRET}
+EOF_HEADER
+```
+
+See the [Heartbeat receipt API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/heartbeat-api.md#send-a-receipt).
 
 ## Manage a webhook Notification destination
 
@@ -156,7 +192,7 @@ IRISBEAT_TEST_CLI="$(command -v terraform)" go test ./acceptance -count=1 -v
 IRISBEAT_TEST_CLI="$(command -v tofu)" go test ./acceptance -count=1 -v
 ```
 
-Tested with Irisbeat v0.5.0, Terraform v1.14.0, and OpenTofu v1.12.5.
+See [Release and registry verification](docs/release.md) for signing, publisher enrollment, and clean registry installs.
 
 ## License
 
