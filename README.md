@@ -61,6 +61,8 @@ resource "irisbeat_notification_destination" "alerts" {
 
 Irisbeat generates a name when you omit `name`. Set `name` to rename the destination in place. Changing the saved webhook URL replaces the destination. Deleting the old destination clears all its Monitor assignments. Irisbeat normalizes recognized Discord webhook URLs to use the `/slack` suffix.
 
+When the webhook URL is unknown during planning, the plan keeps the existing destination. If the URL resolves to the same saved address, apply preserves the ID and Monitor assignments. If the address changes, the CLI stops at the destination with an inconsistent final plan error. Upstream changes may already have applied. Run a fresh plan to review the replacement, or apply the upstream dependency separately before planning.
+
 Run `terraform import irisbeat_notification_destination.alerts <destination-id>` or `tofu import irisbeat_notification_destination.alerts <destination-id>` to adopt an existing webhook. The URL is sensitive in routine CLI output and is stored in plan and state files. If a create ends with an unknown outcome, check Irisbeat and import any existing destination before attempting another create.
 
 ## Verify

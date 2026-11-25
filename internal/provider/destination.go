@@ -6,6 +6,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -97,13 +98,31 @@ func (r *destinationResource) Read(ctx context.Context, req resource.ReadRequest
 }
 
 func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var config, plan, prior destinationModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	var plan, prior destinationModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if !req.State.Raw.IsNull() {
+		resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// A saved Discord URL can exceed the input limit after normalization.
+	if !plan.WebhookURL.IsUnknown() && !plan.WebhookURL.Equal(prior.WebhookURL) {
+		value := plan.WebhookURL.ValueString()
+		if _, valid := parseWebhookURL(value); !valid || utf16Length(value) > 2048 {
+			// Attribute diagnostics may display the URL literal in a source excerpt.
+			resp.Diagnostics.AddError("Invalid Irisbeat webhook URL", "Use an HTTPS webhook URL of at most 2048 characters without whitespace, embedded credentials, or a fragment.")
+			return
+		}
+	}
+	if req.State.Raw.IsNull() {
+		return
+	}
+	var config destinationModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -111,8 +130,13 @@ func (r *destinationResource) ModifyPlan(ctx context.Context, req resource.Modif
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("channel"))
 		return
 	}
-	if plan.WebhookURL.IsUnknown() ||
-		normalizeWebhookURL(plan.WebhookURL.ValueString()) != normalizeWebhookURL(prior.WebhookURL.ValueString()) {
+	if plan.WebhookURL.IsUnknown() {
+		// Both CLIs can refine an update to a no-op, but reject an unplanned replacement.
+		resp.Diagnostics.AddWarning("Webhook URL is unknown", "Apply the upstream dependency first and run a fresh plan to review any destination replacement. If you proceed with this plan and the saved URL would change, the CLI stops at this destination. Upstream changes may already have applied.")
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("id"), prior.ID)...)
+		return
+	}
+	if normalizeWebhookURL(plan.WebhookURL.ValueString()) != normalizeWebhookURL(prior.WebhookURL.ValueString()) {
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("webhook_url"))
 		return
 	}
@@ -173,11 +197,8 @@ func destinationState(saved api.Destination, reference destinationModel) destina
 var discordWebhookPath = regexp.MustCompile(`^(/api(?:/v[0-9]+)?/webhooks/[^/]+/[^/]+)(?:/slack)?/?$`)
 
 func normalizeWebhookURL(value string) string {
-	if strings.IndexFunc(value, jsWhitespace) >= 0 {
-		return value
-	}
-	parsed, err := whatwg.Parse(value)
-	if err != nil || parsed.Scheme() != "https" || parsed.Username() != "" || parsed.Password() != "" || parsed.Fragment() != "" {
+	parsed, valid := parseWebhookURL(value)
+	if !valid {
 		return value
 	}
 	host := parsed.Hostname()
@@ -193,4 +214,20 @@ func normalizeWebhookURL(value string) string {
 	}
 	parsed.SetPathname(path[1] + "/slack")
 	return parsed.Href(false)
+}
+
+func parseWebhookURL(value string) (*whatwg.Url, bool) {
+	if strings.IndexFunc(value, jsWhitespace) >= 0 {
+		return nil, false
+	}
+	parsed, err := whatwg.Parse(value)
+	return parsed, err == nil && parsed.Scheme() == "https" && parsed.Username() == "" && parsed.Password() == "" && parsed.Fragment() == ""
+}
+
+func utf16Length(value string) int {
+	length := 0
+	for _, r := range value {
+		length += utf16.RuneLen(r)
+	}
+	return length
 }
