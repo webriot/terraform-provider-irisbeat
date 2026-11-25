@@ -4,10 +4,14 @@ package provider
 import (
 	"context"
 	"errors"
+	"net/url"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -38,6 +42,11 @@ type monitorModel struct {
 	Cron              types.String `tfsdk:"cron"`
 	Timezone          types.String `tfsdk:"timezone"`
 	DestinationIDs    types.Set    `tfsdk:"destination_ids"`
+
+	HeartbeatPath          types.String `tfsdk:"heartbeat_path"`
+	SilenceSeconds         types.Int64  `tfsdk:"silence_seconds"`
+	RecoverySpacingSeconds types.Int64  `tfsdk:"recovery_spacing_seconds"`
+	GraceSeconds           types.Int64  `tfsdk:"grace_seconds"`
 }
 
 func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -45,22 +54,27 @@ func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataReque
 }
 
 func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	resp.Schema = schema.Schema{Description: "Manages an Irisbeat HTTP or TCP Monitor.", Attributes: map[string]schema.Attribute{
+	resp.Schema = schema.Schema{Description: "Manages an Irisbeat Monitor.", Attributes: map[string]schema.Attribute{
 		"id":                 schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Opaque Irisbeat Monitor ID."},
 		"name":               schema.StringAttribute{Required: true, Description: "Monitor name."},
-		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http or tcp."},
+		"kind":               schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "Monitor kind. Use http, tcp, or heartbeat."},
 		"url":                schema.StringAttribute{Optional: true, Description: "HTTP or HTTPS check target. Required for HTTP Monitors."},
 		"hostname":           schema.StringAttribute{Optional: true, Description: "DNS name or IP address. Required for TCP Monitors."},
 		"port":               schema.Int64Attribute{Optional: true, Description: "Port from 1 to 65535. Required for TCP Monitors."},
 		"published":          schema.BoolAttribute{Required: true, Description: "Whether the Monitor appears on the public status page."},
 		"schedule_mode":      schema.StringAttribute{Optional: true, Computed: true, Description: "interval or calendar. New Monitors default to interval."},
-		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Outbound check interval, retained when scheduling in Calendar mode."},
+		"interval_seconds":   schema.Int64Attribute{Optional: true, Computed: true, Description: "Check interval or expected Heartbeat receipt interval in seconds. HTTP and TCP Monitors retain it in Calendar mode."},
 		"timeout_seconds":    schema.Int64Attribute{Optional: true, Computed: true, Description: "Check timeout in seconds."},
 		"failure_threshold":  schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive failures required to open an Incident."},
 		"recovery_threshold": schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive successes required to resolve an Incident."},
 		"cron":               schema.StringAttribute{Optional: true, Computed: true, Description: "Numeric five-field cron expression for Calendar scheduling."},
 		"timezone":           schema.StringAttribute{Optional: true, Computed: true, Description: "Named Calendar timezone. Defaults to UTC when entering Calendar mode."},
 		"destination_ids":    schema.SetAttribute{Optional: true, Computed: true, ElementType: types.StringType, Description: "Complete set of Notification destination IDs. Omit to preserve saved routing or use an empty set to clear it."},
+
+		"heartbeat_path":           schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}, Description: "Heartbeat receipt path for the saved Monitor ID. Authenticate receipts with the installation secret."},
+		"silence_seconds":          schema.Int64Attribute{Optional: true, Computed: true, Description: "Seconds without a receipt before an Interval Heartbeat opens an Incident."},
+		"recovery_spacing_seconds": schema.Int64Attribute{Optional: true, Computed: true, Description: "Minimum seconds between qualifying Interval Heartbeat recovery receipts."},
+		"grace_seconds":            schema.Int64Attribute{Optional: true, Computed: true, Description: "Seconds after a scheduled Calendar Heartbeat occurrence to accept a receipt."},
 	}}
 }
 
@@ -82,32 +96,52 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	switch config.Kind.ValueString() {
+	validateMonitorConfig(config, &resp.Diagnostics)
+}
+
+func configured(value attr.Value) bool {
+	return !value.IsNull() && !value.IsUnknown()
+}
+
+func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
+	kind := config.Kind.ValueString()
+	switch kind {
 	case "http":
-		if config.URL.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
-		}
-		if !config.Hostname.IsNull() && !config.Hostname.IsUnknown() {
-			resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Unexpected HTTP target attribute", "hostname is only available for TCP Monitors.")
-		}
-		if !config.Port.IsNull() && !config.Port.IsUnknown() {
-			resp.Diagnostics.AddAttributeError(path.Root("port"), "Unexpected HTTP target attribute", "port is only available for TCP Monitors.")
-		}
+		validateHTTPTarget(config.URL, diags)
 	case "tcp":
-		if config.Hostname.IsNull() || (!config.Hostname.IsUnknown() && config.Hostname.ValueString() == "") {
-			resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
+		if config.Hostname.IsNull() || (configured(config.Hostname) && config.Hostname.ValueString() == "") {
+			diags.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
 		}
 		if config.Port.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("port"), "Missing TCP port", "TCP Monitors require port.")
-		} else if !config.Port.IsUnknown() && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
-			resp.Diagnostics.AddAttributeError(path.Root("port"), "Invalid TCP port", "Use an integer from 1 to 65535.")
+			diags.AddAttributeError(path.Root("port"), "Missing TCP port", "TCP Monitors require port.")
+		} else if configured(config.Port) && (config.Port.ValueInt64() < 1 || config.Port.ValueInt64() > 65535) {
+			diags.AddAttributeError(path.Root("port"), "Invalid TCP port", "Use an integer from 1 to 65535.")
 		}
-		if !config.URL.IsNull() && !config.URL.IsUnknown() {
-			resp.Diagnostics.AddAttributeError(path.Root("url"), "Unexpected TCP target attribute", "url is only available for HTTP Monitors.")
+	case "heartbeat":
+		if configured(config.TimeoutSeconds) || configured(config.FailureThreshold) {
+			diags.AddAttributeError(path.Root("kind"), "Outbound Monitor kind required", "Configure timeout_seconds or failure_threshold only for HTTP or TCP Monitors.")
 		}
 	default:
-		if !config.Kind.IsNull() && !config.Kind.IsUnknown() {
-			resp.Diagnostics.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http or tcp for the Monitor kind.")
+		if configured(config.Kind) {
+			diags.AddAttributeError(path.Root("kind"), "Unsupported Monitor kind", "Use http, tcp, or heartbeat for the Monitor kind.")
+		}
+	}
+	if kind == "tcp" || kind == "heartbeat" {
+		if configured(config.URL) {
+			diags.AddAttributeError(path.Root("url"), "HTTP kind required", "url is only available for HTTP Monitors.")
+		}
+	}
+	if kind == "http" || kind == "heartbeat" {
+		if configured(config.Hostname) {
+			diags.AddAttributeError(path.Root("hostname"), "TCP kind required", "hostname is only available for TCP Monitors.")
+		}
+		if configured(config.Port) {
+			diags.AddAttributeError(path.Root("port"), "TCP kind required", "port is only available for TCP Monitors.")
+		}
+	}
+	if kind == "http" || kind == "tcp" {
+		if configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds) || configured(config.GraceSeconds) {
+			diags.AddAttributeError(path.Root("kind"), "Heartbeat kind required", "Configure silence_seconds, recovery_spacing_seconds, or grace_seconds only for Heartbeat Monitors.")
 		}
 	}
 	if config.ScheduleMode.IsUnknown() {
@@ -115,35 +149,95 @@ func (r *monitorResource) ValidateConfig(ctx context.Context, req resource.Valid
 	}
 	switch config.ScheduleMode.ValueString() {
 	case "calendar":
+		if config.Kind.ValueString() == "heartbeat" &&
+			(configured(config.IntervalSeconds) || configured(config.SilenceSeconds) || configured(config.RecoverySpacingSeconds)) {
+			diags.AddAttributeError(path.Root("schedule_mode"), "Interval mode required", "Configure interval_seconds, silence_seconds, or recovery_spacing_seconds only for Interval Heartbeats.")
+		}
 		if config.Cron.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
+			diags.AddAttributeError(path.Root("cron"), "Missing Calendar schedule", "Configure cron when schedule_mode is calendar.")
 		}
 	case "", "interval":
-		if !config.Cron.IsNull() || !config.Timezone.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
+		if configured(config.GraceSeconds) {
+			diags.AddAttributeError(path.Root("grace_seconds"), "Calendar mode required", "Set schedule_mode to calendar to configure grace_seconds.")
+		}
+		if configured(config.Cron) || configured(config.Timezone) {
+			diags.AddAttributeError(path.Root("schedule_mode"), "Calendar mode required", "Set schedule_mode to calendar to configure cron or timezone.")
 		}
 		if !config.ScheduleMode.IsNull() && config.ScheduleMode.ValueString() == "" {
-			resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
+			diags.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
 		}
 	default:
-		resp.Diagnostics.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
+		diags.AddAttributeError(path.Root("schedule_mode"), "Invalid Monitor schedule", "Use interval or calendar.")
 	}
 }
 
-// An import has no configuration, so it records the server's canonical spelling.
-// Keep that state when every configured field already describes the saved Monitor.
-func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+func validateHTTPTarget(target types.String, diags *diag.Diagnostics) {
+	if target.IsNull() {
+		diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
 		return
 	}
-	var config, prior types.Object
+	if target.IsUnknown() {
+		return
+	}
+	value := target.ValueString()
+	parsed, err := whatwg.Parse(value)
+	if err != nil || (parsed.Scheme() != "http" && parsed.Scheme() != "https") ||
+		parsed.Username() != "" || parsed.Password() != "" || len(utf16.Encode([]rune(value))) > 2048 {
+		diags.AddAttributeError(path.Root("url"), "Invalid HTTP target",
+			"Use an HTTP or HTTPS URL without embedded credentials and with at most 2,048 UTF-16 code units.")
+	}
+}
+
+func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var config types.Object
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	desiredFields := config.Attributes()
+	// Configuration validation can run before expressions resolve during planning.
+	if desiredFields["kind"].Equal(types.StringValue("http")) {
+		validateHTTPTarget(desiredFields["url"].(types.String), &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	if desiredFields["kind"].Equal(types.StringValue("heartbeat")) && desiredFields["schedule_mode"].IsNull() &&
+		(configured(desiredFields["interval_seconds"]) || configured(desiredFields["silence_seconds"]) || configured(desiredFields["recovery_spacing_seconds"])) {
+		interval := types.StringValue("interval")
+		desiredFields["schedule_mode"] = interval
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("schedule_mode"), interval)...)
+	}
+	if req.State.Raw.IsNull() || resp.Diagnostics.HasError() {
+		return
+	}
+
+	var prior types.Object
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	savedFields := prior.Attributes()
-	for name, desired := range config.Attributes() {
+	if !desiredFields["kind"].Equal(savedFields["kind"]) {
+		// The CLI can delete the old Monitor before Create validates resolved inputs.
+		for name, desired := range desiredFields {
+			set, _ := desired.(types.Set)
+			if desired.IsUnknown() || slices.ContainsFunc(set.Elements(), attr.Value.IsUnknown) {
+				resp.Diagnostics.AddAttributeError(path.Root(name), "Monitor replacement requires a known value",
+					"Resolve this value before planning a Monitor kind change. Apply its upstream dependencies separately, then plan again.")
+			}
+		}
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
+	// An import records the server's canonical spelling. Keep it when every
+	// configured field already describes the saved Monitor.
+	for name, desired := range desiredFields {
 		saved := savedFields[name]
 		if desired.IsNull() || desired.Equal(saved) {
 			continue
@@ -170,12 +264,17 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 }
 
 func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan monitorModel
+	var config, plan monitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	fields := monitorFields(ctx, plan, monitorModel{}, &resp.Diagnostics)
+	validateMonitorConfig(config, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	fields := monitorFields(ctx, plan, monitorModel{}, config.DestinationIDs, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -210,13 +309,18 @@ func (r *monitorResource) Read(ctx context.Context, req resource.ReadRequest, re
 }
 
 func (r *monitorResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, prior monitorModel
+	var config, plan, prior monitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	patch := monitorFields(ctx, plan, prior, &resp.Diagnostics)
+	validateMonitorConfig(config, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	patch := monitorFields(ctx, plan, prior, config.DestinationIDs, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -260,7 +364,7 @@ func (r *monitorResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 }
 
-func monitorFields(ctx context.Context, desired, prior monitorModel, diags *diag.Diagnostics) map[string]any {
+func monitorFields(ctx context.Context, desired, prior monitorModel, assignments types.Set, diags *diag.Diagnostics) map[string]any {
 	fields := make(map[string]any)
 	for _, field := range []struct {
 		key        string
@@ -290,23 +394,26 @@ func monitorFields(ctx context.Context, desired, prior monitorModel, diags *diag
 		{"timeoutSeconds", desired.TimeoutSeconds, prior.TimeoutSeconds},
 		{"failureThreshold", desired.FailureThreshold, prior.FailureThreshold},
 		{"recoveryThreshold", desired.RecoveryThreshold, prior.RecoveryThreshold},
+		{"silenceSeconds", desired.SilenceSeconds, prior.SilenceSeconds},
+		{"recoverySpacingSeconds", desired.RecoverySpacingSeconds, prior.RecoverySpacingSeconds},
+		{"graceSeconds", desired.GraceSeconds, prior.GraceSeconds},
 	} {
 		if !field.value.IsUnknown() && !field.value.IsNull() && !field.value.Equal(field.old) {
 			fields[field.key] = field.value.ValueInt64()
 		}
 	}
-	// The framework leaves omitted computed values unknown on a write.
-	if !desired.DestinationIDs.IsNull() && !desired.DestinationIDs.IsUnknown() {
-		ids := make([]string, 0, len(desired.DestinationIDs.Elements()))
-		diags.Append(desired.DestinationIDs.ElementsAs(ctx, &ids, false)...)
+	// Only configuration owns routing. The computed plan can contain observed IDs.
+	if !assignments.IsNull() {
+		ids := make([]string, 0, len(assignments.Elements()))
+		diags.Append(assignments.ElementsAs(ctx, &ids, false)...)
 		fields["destinationIds"] = ids
 	}
 	return fields
 }
 
 func monitorState(ctx context.Context, m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
-	if m.Kind != "http" && m.Kind != "tcp" {
-		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP and TCP Monitors.")
+	if m.Kind != "http" && m.Kind != "tcp" && m.Kind != "heartbeat" {
+		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP, TCP, and Heartbeat Monitors.")
 		return monitorModel{}, false
 	}
 	destinationIDs, setDiags := types.SetValueFrom(ctx, types.StringType, m.DestinationIDs)
@@ -315,15 +422,28 @@ func monitorState(ctx context.Context, m api.Monitor, reference monitorModel, di
 		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, trimJS),
 		Kind:      types.StringValue(m.Kind),
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
-		IntervalSeconds: types.Int64Value(m.IntervalSeconds), TimeoutSeconds: types.Int64Value(m.TimeoutSeconds),
-		FailureThreshold: types.Int64Value(m.FailureThreshold), RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
-		DestinationIDs: destinationIDs,
+		RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
+		DestinationIDs:    destinationIDs,
 	}
-	if m.Kind == "tcp" {
-		state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
-		state.Port = types.Int64Value(m.Port)
+	if m.Kind == "heartbeat" {
+		state.HeartbeatPath = types.StringValue("/heartbeat/" + url.PathEscape(m.ID))
+		if m.ScheduleMode == "calendar" {
+			state.GraceSeconds = types.Int64Value(m.GraceSeconds)
+		} else {
+			state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
+			state.SilenceSeconds = types.Int64Value(m.SilenceSeconds)
+			state.RecoverySpacingSeconds = types.Int64Value(m.RecoverySpacingSeconds)
+		}
 	} else {
-		state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
+		state.IntervalSeconds = types.Int64Value(m.IntervalSeconds)
+		state.TimeoutSeconds = types.Int64Value(m.TimeoutSeconds)
+		state.FailureThreshold = types.Int64Value(m.FailureThreshold)
+		if m.Kind == "tcp" {
+			state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
+			state.Port = types.Int64Value(m.Port)
+		} else {
+			state.URL = equivalentString(m.URL, reference.URL, normalizeURL)
+		}
 	}
 	if m.ScheduleMode == "calendar" {
 		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)

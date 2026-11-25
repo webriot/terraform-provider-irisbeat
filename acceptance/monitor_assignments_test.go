@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,19 @@ func TestMonitorAssignmentOwnership(t *testing.T) {
 	if baseURL == "" || key == "" || operatorSecret == "" {
 		t.Skip("set IRISBEAT_TEST_BASE_URL, IRISBEAT_TEST_API_KEY and IRISBEAT_TEST_INSTALLATION_SECRET for disposable Irisbeat")
 	}
+	for _, tc := range []struct{ kind, target string }{
+		{"http", `url = "https://example.com/"`},
+		{"tcp", "hostname = \"db.example.com\"\n  port = 5432"},
+		{"heartbeat", ""},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			testMonitorAssignmentOwnership(t, baseURL, key, operatorSecret, tc.kind, tc.target)
+		})
+	}
+}
+
+func testMonitorAssignmentOwnership(t *testing.T, baseURL, key, operatorSecret, kind, target string) {
+	t.Helper()
 	w := workspace(t, baseURL, key)
 	config := func(name, assignments string) {
 		w.config(fmt.Sprintf(`
@@ -32,12 +46,12 @@ resource "irisbeat_notification_destination" "second" {
 
 resource "irisbeat_monitor" "test" {
   name      = %q
-  kind      = "http"
-  url       = "https://example.com/"
+  kind      = %q
   published = false
   %s
+  %s
 }
-`, name, assignments))
+`, name, kind, target, assignments))
 	}
 	const first = "irisbeat_notification_destination.first.id"
 	const second = "irisbeat_notification_destination.second.id"
@@ -116,6 +130,94 @@ resource "irisbeat_monitor" "test" {
 	config("Rejected rename", fmt.Sprintf("destination_ids = [%s, %q]", first, rand.Text()))
 	w.run(1, "apply", "-auto-approve", noColor)
 	saved(unmanagedName, firstID, secondID)
+}
+
+func TestUnknownAssignmentsBlockKindReplacement(t *testing.T) {
+	baseURL, key := os.Getenv("IRISBEAT_TEST_BASE_URL"), os.Getenv("IRISBEAT_TEST_API_KEY")
+	secret := os.Getenv("IRISBEAT_TEST_INSTALLATION_SECRET")
+	if baseURL == "" || key == "" || secret == "" {
+		t.Skip("set IRISBEAT_TEST_BASE_URL, IRISBEAT_TEST_API_KEY and IRISBEAT_TEST_INSTALLATION_SECRET for disposable Irisbeat")
+	}
+	w := workspace(t, baseURL, key)
+	destinationID := installationRequest(t, http.MethodPost, baseURL+"/api/v1/destinations", key,
+		`{"url":"https://hooks.example/kind-replacement"}`, http.StatusCreated)["id"].(string)
+	cleanupResource(t, baseURL+"/api/v1/destinations/"+destinationID, key)
+	w.config(fmt.Sprintf(`
+resource "irisbeat_monitor" "test" {
+  name            = "Assignment replacement validation"
+  kind            = "heartbeat"
+  published       = false
+  destination_ids = [%q]
+}
+`, destinationID))
+	w.run(0, "apply", "-auto-approve", "-no-color")
+	id := w.monitor()["id"].(string)
+	endpoint := baseURL + "/api/v1/monitors/" + id
+	receiptPath := "/heartbeat/" + id
+	cleanupResource(t, endpoint, key)
+	installationRequest(t, http.MethodPost, baseURL+receiptPath, secret, "", http.StatusNoContent)
+	saved := installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK)
+	receipt := func() any {
+		t.Helper()
+		snapshot := installationRequest(t, http.MethodGet, baseURL+"/api/v1/status", key, "", http.StatusOK)
+		for _, entry := range snapshot["monitors"].([]any) {
+			m := entry.(map[string]any)
+			if m["id"] == id {
+				return m["lastSeen"]
+			}
+		}
+		t.Fatal("original Heartbeat is missing from Irisbeat status")
+		return nil
+	}
+	lastSeen := receipt()
+	if lastSeen == nil {
+		t.Fatal("expected saved Heartbeat receipt history")
+	}
+	config := func(assignments string) {
+		w.config(fmt.Sprintf(`
+resource "terraform_data" "input" {
+  input = { ids = [%q], id = %q }
+}
+
+resource "irisbeat_monitor" "test" {
+  name            = "Assignment replacement validation"
+  kind            = "http"
+  url             = "https://example.com/"
+  published       = false
+  destination_ids = %s
+}
+`, destinationID, destinationID, assignments))
+	}
+	for _, assignments := range []string{
+		"terraform_data.input.output.ids",
+		fmt.Sprintf("[%q, terraform_data.input.output.id]", destinationID),
+	} {
+		config(assignments)
+		out := w.run(1, "plan", "-no-color")
+		if !strings.Contains(out, "Monitor replacement requires a known value") || !strings.Contains(out, "destination_ids") {
+			t.Fatalf("expected replacement diagnostic for destination_ids\n%s", out)
+		}
+		if got := installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK); !reflect.DeepEqual(got, saved) {
+			t.Fatal("blocked replacement changed the saved Heartbeat or its routing")
+		}
+		if got := receipt(); got != lastSeen {
+			t.Fatalf("lastSeen = %v, want %v", got, lastSeen)
+		}
+		assertFields(t, w.monitor(), map[string]any{"id": id, "heartbeat_path": receiptPath})
+	}
+
+	w.run(0, "apply", "-target=terraform_data.input", "-auto-approve", "-no-color")
+	w.run(0, "apply", "-auto-approve", "-no-color")
+	newID := w.monitor()["id"].(string)
+	newEndpoint := baseURL + "/api/v1/monitors/" + newID
+	cleanupResource(t, newEndpoint, key)
+	if newID == id {
+		t.Fatal("expected a new Monitor ID after changing kind")
+	}
+	installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusNotFound)
+	replacement := installationRequest(t, http.MethodGet, newEndpoint, key, "", http.StatusOK)
+	assertRouting(t, replacement["destinationIds"], destinationID)
+	w.run(0, "plan", "-detailed-exitcode", "-no-color")
 }
 
 func assertRouting(t *testing.T, actual any, want ...string) {

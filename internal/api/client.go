@@ -68,6 +68,10 @@ type Monitor struct {
 	Cron              string   `json:"cron"`
 	Timezone          string   `json:"timezone"`
 	DestinationIDs    []string `json:"destinationIds"`
+
+	SilenceSeconds         int64 `json:"silenceSeconds"`
+	RecoverySpacingSeconds int64 `json:"recoverySpacingSeconds"`
+	GraceSeconds           int64 `json:"graceSeconds"`
 }
 
 type endpoint[T any] struct {
@@ -82,7 +86,8 @@ var monitors = endpoint[Monitor]{
 	valid: func(m Monitor, id string) bool {
 		return m.ID != "" && (id == "" || m.ID == id) && m.Name != "" &&
 			m.Kind != "" && m.Published != nil && m.DestinationIDs != nil &&
-			((m.Kind != "http" && m.Kind != "tcp") || validOutboundMonitor(m))
+			((m.Kind != "http" && m.Kind != "tcp") || validOutboundMonitor(m)) &&
+			(m.Kind != "heartbeat" || validHeartbeatMonitor(m))
 	},
 }
 
@@ -212,6 +217,20 @@ func validOutboundMonitor(m Monitor) bool {
 		return false
 	}
 	return m.ScheduleMode == "interval" || (m.ScheduleMode == "calendar" && m.Cron != "" && m.Timezone != "")
+}
+
+func validHeartbeatMonitor(m Monitor) bool {
+	if m.RecoveryThreshold < 1 {
+		return false
+	}
+	switch m.ScheduleMode {
+	case "interval":
+		return m.IntervalSeconds > 0 && m.SilenceSeconds > 0 && m.RecoverySpacingSeconds > 0
+	case "calendar":
+		return m.Cron != "" && m.Timezone != "" && m.GraceSeconds > 0
+	default:
+		return false
+	}
 }
 
 func decode(body io.Reader, value any) bool {
