@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/Webriot/terraform-provider-irisbeat/internal/api"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -103,9 +104,7 @@ func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
 	kind := config.Kind.ValueString()
 	switch kind {
 	case "http":
-		if config.URL.IsNull() {
-			diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
-		}
+		validateHTTPTarget(config.URL, diags)
 	case "tcp":
 		if config.Hostname.IsNull() || (configured(config.Hostname) && config.Hostname.ValueString() == "") {
 			diags.AddAttributeError(path.Root("hostname"), "Missing TCP target", "TCP Monitors require hostname.")
@@ -169,6 +168,23 @@ func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
 	}
 }
 
+func validateHTTPTarget(target types.String, diags *diag.Diagnostics) {
+	if target.IsNull() {
+		diags.AddAttributeError(path.Root("url"), "Missing HTTP target", "HTTP Monitors require url.")
+		return
+	}
+	if target.IsUnknown() {
+		return
+	}
+	value := target.ValueString()
+	parsed, err := whatwg.Parse(value)
+	if err != nil || (parsed.Scheme() != "http" && parsed.Scheme() != "https") ||
+		parsed.Username() != "" || parsed.Password() != "" || len(utf16.Encode([]rune(value))) > 2048 {
+		diags.AddAttributeError(path.Root("url"), "Invalid HTTP target",
+			"Use an HTTP or HTTPS URL without embedded credentials and with at most 2,048 UTF-16 code units.")
+	}
+}
+
 func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -179,6 +195,13 @@ func (r *monitorResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 		return
 	}
 	desiredFields := config.Attributes()
+	// Configuration validation can run before expressions resolve during planning.
+	if desiredFields["kind"].Equal(types.StringValue("http")) {
+		validateHTTPTarget(desiredFields["url"].(types.String), &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
 	if desiredFields["kind"].Equal(types.StringValue("heartbeat")) && desiredFields["schedule_mode"].IsNull() &&
 		(configured(desiredFields["interval_seconds"]) || configured(desiredFields["silence_seconds"]) || configured(desiredFields["recovery_spacing_seconds"])) {
 		interval := types.StringValue("interval")

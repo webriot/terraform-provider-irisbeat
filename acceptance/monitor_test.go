@@ -143,6 +143,28 @@ func assertFields(t *testing.T, actual, expected map[string]any) {
 	}
 }
 
+func cleanupMonitor(t *testing.T, endpoint, key string) {
+	t.Helper()
+	// The API cleanup also covers failures between state removal and re-import.
+	req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("cleanup status = %d", resp.StatusCode)
+	}
+}
+
 func TestHTTPMonitorLifecycle(t *testing.T) {
 	baseURL, key := os.Getenv("IRISBEAT_TEST_BASE_URL"), os.Getenv("IRISBEAT_TEST_API_KEY")
 	operatorSecret := os.Getenv("IRISBEAT_TEST_INSTALLATION_SECRET")
@@ -168,24 +190,7 @@ resource "irisbeat_monitor" "test" {
 	id := w.monitor()["id"].(string)
 	endpoint := baseURL + "/api/v1/monitors/" + id
 	t.Cleanup(func() {
-		// The API cleanup also covers failures between state removal and re-import.
-		req, err := http.NewRequest(http.MethodDelete, endpoint, nil)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+key)
-		client := http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-			t.Errorf("cleanup status = %d", resp.StatusCode)
-		}
+		cleanupMonitor(t, endpoint, key)
 	})
 	assertFields(t, installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK), map[string]any{
 		"name": "HTTP acceptance", "url": "https://example.com/", "published": false,

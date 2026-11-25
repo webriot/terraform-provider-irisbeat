@@ -49,7 +49,15 @@ resource "irisbeat_monitor" "database" {
 }
 ```
 
-Use a DNS name or IP address for the TCP hostname and a port from 1 to 65535. Target and schedule edits preserve the Monitor ID. Changing the kind replaces the Monitor. If any configured value is unknown during planning, apply its upstream dependencies separately before planning the kind change.
+Use an HTTP(S) URL without embedded credentials for HTTP and a DNS name or IP address with a port from 1 to 65535 for TCP. The provider rejects known malformed HTTP targets during planning. Target and schedule edits preserve the Monitor ID.
+
+### Changing Monitor kind
+
+A kind change plans a native replacement with a new ID. If any configured value is unknown during planning, apply its upstream dependencies separately before planning the kind change.
+
+By default, Terraform and OpenTofu delete the existing Monitor before creating its replacement. Irisbeat checks installation-specific constraints during the create. The v0.5.0 automation API has no Write-key endpoint to read the check floor or validate a proposed Monitor without saving it. The separate [Operator API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api.md#outbound-check-floor) requires the installation secret. It exposes the floor in Operator snapshots and can preview Calendar schedules.
+
+To keep the old Monitor until the replacement is created, set `lifecycle { create_before_destroy = true }` on the resource. On a disposable Irisbeat v0.5.0 installation with a 120-second check floor, Terraform 1.14.0 and OpenTofu 1.12.5 both rejected a malformed HTTP URL at plan time in either lifecycle order. A valid URL with a 60-second interval passed planning and Irisbeat rejected the create during apply. The default order removed the old Heartbeat. With `create_before_destroy`, the failed create preserved its ID, webhook assignment, and last receipt. A successful replacement starts with a new ID and history. Omitted routing starts empty.
 
 Irisbeat supplies omitted timing on create and enforces the installation's check floor. Set `schedule_mode = "calendar"` with `cron` to use a Calendar schedule. Set `schedule_mode = "interval"` and remove `cron` and `timezone` to switch back. Irisbeat retains the saved `interval_seconds` for HTTP and TCP Monitors in Calendar mode. Supply a new interval when switching back if the saved interval falls below the check floor.
 
