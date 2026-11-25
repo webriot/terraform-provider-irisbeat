@@ -37,6 +37,7 @@ type monitorModel struct {
 	RecoveryThreshold types.Int64  `tfsdk:"recovery_threshold"`
 	Cron              types.String `tfsdk:"cron"`
 	Timezone          types.String `tfsdk:"timezone"`
+	DestinationIDs    types.Set    `tfsdk:"destination_ids"`
 }
 
 func (r *monitorResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -59,6 +60,7 @@ func (r *monitorResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		"recovery_threshold": schema.Int64Attribute{Optional: true, Computed: true, Description: "Consecutive successes required to resolve an Incident."},
 		"cron":               schema.StringAttribute{Optional: true, Computed: true, Description: "Numeric five-field cron expression for Calendar scheduling."},
 		"timezone":           schema.StringAttribute{Optional: true, Computed: true, Description: "Named Calendar timezone. Defaults to UTC when entering Calendar mode."},
+		"destination_ids":    schema.SetAttribute{Optional: true, Computed: true, ElementType: types.StringType, Description: "Complete set of Notification destination IDs. Omit to preserve saved routing or use an empty set to clear it."},
 	}}
 }
 
@@ -173,12 +175,16 @@ func (r *monitorResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	monitor, err := r.client.CreateMonitor(ctx, monitorFields(plan, monitorModel{}))
+	fields := monitorFields(ctx, plan, monitorModel{}, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	monitor, err := r.client.CreateMonitor(ctx, fields)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create Irisbeat Monitor", err.Error())
 		return
 	}
-	if state, ok := monitorState(monitor, plan, &resp.Diagnostics); ok {
+	if state, ok := monitorState(ctx, monitor, plan, &resp.Diagnostics); ok {
 		resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 	}
 }
@@ -198,7 +204,7 @@ func (r *monitorResource) Read(ctx context.Context, req resource.ReadRequest, re
 		resp.Diagnostics.AddError("Unable to refresh Irisbeat Monitor", err.Error())
 		return
 	}
-	if state, ok := monitorState(monitor, prior, &resp.Diagnostics); ok {
+	if state, ok := monitorState(ctx, monitor, prior, &resp.Diagnostics); ok {
 		resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 	}
 }
@@ -210,7 +216,10 @@ func (r *monitorResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	patch := monitorFields(plan, prior)
+	patch := monitorFields(ctx, plan, prior, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	id := prior.ID.ValueString()
 	var monitor api.Monitor
 	var err error
@@ -223,7 +232,7 @@ func (r *monitorResource) Update(ctx context.Context, req resource.UpdateRequest
 		resp.Diagnostics.AddError("Unable to update Irisbeat Monitor", err.Error())
 		return
 	}
-	if state, ok := monitorState(monitor, plan, &resp.Diagnostics); ok {
+	if state, ok := monitorState(ctx, monitor, plan, &resp.Diagnostics); ok {
 		resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 	}
 }
@@ -246,12 +255,12 @@ func (r *monitorResource) ImportState(ctx context.Context, req resource.ImportSt
 		resp.Diagnostics.AddError("Unable to import Irisbeat Monitor", err.Error())
 		return
 	}
-	if state, ok := monitorState(monitor, monitorModel{}, &resp.Diagnostics); ok {
+	if state, ok := monitorState(ctx, monitor, monitorModel{}, &resp.Diagnostics); ok {
 		resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 	}
 }
 
-func monitorFields(desired, prior monitorModel) map[string]any {
+func monitorFields(ctx context.Context, desired, prior monitorModel, diags *diag.Diagnostics) map[string]any {
 	fields := make(map[string]any)
 	for _, field := range []struct {
 		key        string
@@ -286,20 +295,29 @@ func monitorFields(desired, prior monitorModel) map[string]any {
 			fields[field.key] = field.value.ValueInt64()
 		}
 	}
+	// The framework leaves omitted computed values unknown on a write.
+	if !desired.DestinationIDs.IsNull() && !desired.DestinationIDs.IsUnknown() {
+		ids := make([]string, 0, len(desired.DestinationIDs.Elements()))
+		diags.Append(desired.DestinationIDs.ElementsAs(ctx, &ids, false)...)
+		fields["destinationIds"] = ids
+	}
 	return fields
 }
 
-func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
+func monitorState(ctx context.Context, m api.Monitor, reference monitorModel, diags *diag.Diagnostics) (monitorModel, bool) {
 	if m.Kind != "http" && m.Kind != "tcp" {
 		diags.AddError("Unsupported Irisbeat Monitor kind", "This provider manages HTTP and TCP Monitors.")
 		return monitorModel{}, false
 	}
+	destinationIDs, setDiags := types.SetValueFrom(ctx, types.StringType, m.DestinationIDs)
+	diags.Append(setDiags...)
 	state := monitorModel{
 		ID: types.StringValue(m.ID), Name: equivalentString(m.Name, reference.Name, trimJS),
 		Kind:      types.StringValue(m.Kind),
 		Published: types.BoolValue(*m.Published), ScheduleMode: types.StringValue(m.ScheduleMode),
 		IntervalSeconds: types.Int64Value(m.IntervalSeconds), TimeoutSeconds: types.Int64Value(m.TimeoutSeconds),
 		FailureThreshold: types.Int64Value(m.FailureThreshold), RecoveryThreshold: types.Int64Value(m.RecoveryThreshold),
+		DestinationIDs: destinationIDs,
 	}
 	if m.Kind == "tcp" {
 		state.Hostname = equivalentString(m.Hostname, reference.Hostname, normalizeHostname)
@@ -311,7 +329,7 @@ func monitorState(m api.Monitor, reference monitorModel, diags *diag.Diagnostics
 		state.Cron = equivalentString(m.Cron, reference.Cron, normalizeCron)
 		state.Timezone = types.StringValue(m.Timezone)
 	}
-	return state, true
+	return state, !diags.HasError()
 }
 
 func equivalentString(saved string, reference types.String, normalize func(string) string) types.String {

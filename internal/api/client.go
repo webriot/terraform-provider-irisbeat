@@ -53,20 +53,21 @@ func New(baseURL, key string) (*Client, error) {
 }
 
 type Monitor struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Kind              string `json:"kind"`
-	URL               string `json:"url"`
-	Hostname          string `json:"hostname"`
-	Port              int64  `json:"port"`
-	Published         *bool  `json:"published"`
-	ScheduleMode      string `json:"scheduleMode"`
-	IntervalSeconds   int64  `json:"intervalSeconds"`
-	TimeoutSeconds    int64  `json:"timeoutSeconds"`
-	FailureThreshold  int64  `json:"failureThreshold"`
-	RecoveryThreshold int64  `json:"recoveryThreshold"`
-	Cron              string `json:"cron"`
-	Timezone          string `json:"timezone"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Kind              string   `json:"kind"`
+	URL               string   `json:"url"`
+	Hostname          string   `json:"hostname"`
+	Port              int64    `json:"port"`
+	Published         *bool    `json:"published"`
+	ScheduleMode      string   `json:"scheduleMode"`
+	IntervalSeconds   int64    `json:"intervalSeconds"`
+	TimeoutSeconds    int64    `json:"timeoutSeconds"`
+	FailureThreshold  int64    `json:"failureThreshold"`
+	RecoveryThreshold int64    `json:"recoveryThreshold"`
+	Cron              string   `json:"cron"`
+	Timezone          string   `json:"timezone"`
+	DestinationIDs    []string `json:"destinationIds"`
 }
 
 type endpoint[T any] struct {
@@ -77,10 +78,10 @@ type endpoint[T any] struct {
 
 var monitors = endpoint[Monitor]{
 	path: "/api/v1/monitors", label: "Monitor", missingMessage: "Monitor not found", missing: ErrMonitorMissing,
-	invalidConfig: "Check the target, schedule, timing, and installation check floor",
+	invalidConfig: "Check the target, schedule, timing, installation check floor, and destination IDs",
 	valid: func(m Monitor, id string) bool {
 		return m.ID != "" && (id == "" || m.ID == id) && m.Name != "" &&
-			m.Kind != "" && m.Published != nil &&
+			m.Kind != "" && m.Published != nil && m.DestinationIDs != nil &&
 			((m.Kind != "http" && m.Kind != "tcp") || validOutboundMonitor(m))
 	},
 }
@@ -225,6 +226,14 @@ func responseError[T any](resp *http.Response, resource bool, ep endpoint[T]) er
 	case http.StatusForbidden:
 		return errors.New("the API key has insufficient permission. Use an Irisbeat Write API key")
 	case http.StatusBadRequest:
+		if ep.path == monitors.path {
+			var payload struct {
+				Code string `json:"code"`
+			}
+			if decode(resp.Body, &payload) && payload.Code == "destination_pending_confirmation" {
+				return errors.New("an email destination is awaiting confirmation. Ask the recipient to confirm the address, then reapply.")
+			}
+		}
 		return fmt.Errorf("Irisbeat rejected the %s configuration. %s", ep.label, ep.invalidConfig)
 	case http.StatusConflict:
 		return errors.New("Irisbeat reported a conflict. Check the installation before trying again")

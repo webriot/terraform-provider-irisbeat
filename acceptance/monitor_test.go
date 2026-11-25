@@ -281,7 +281,7 @@ func TestAPIResponseHandling(t *testing.T) {
 		w.WriteHeader(code)
 		switch {
 		case code == http.StatusOK:
-			_, _ = io.WriteString(w, `{"id":"monitor-from-alias","name":"HTTP acceptance","kind":"http","url":"https://example.com/","published":true,"scheduleMode":"interval","intervalSeconds":60,"timeoutSeconds":10,"failureThreshold":2,"recoveryThreshold":2}`)
+			_, _ = io.WriteString(w, `{"id":"monitor-from-alias","name":"HTTP acceptance","kind":"http","url":"https://example.com/","published":true,"scheduleMode":"interval","intervalSeconds":60,"timeoutSeconds":10,"failureThreshold":2,"recoveryThreshold":2,"destinationIds":[]}`)
 		case code == http.StatusNotFound && !generic404.Load():
 			_, _ = io.WriteString(w, notFound)
 		default:
