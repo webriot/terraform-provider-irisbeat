@@ -18,13 +18,11 @@ import (
 )
 
 const (
-	monitorPath = "/api/v1/monitors"
 	maxResponse = 64 << 10
 )
 
 var (
 	ErrMonitorMissing = errors.New("the Monitor does not exist in this Irisbeat installation")
-	errCreateUnknown  = errors.New("create outcome is unknown. Check Irisbeat and import any existing Monitor by ID before trying again")
 	errUnexpected     = errors.New("Irisbeat returned an unexpected response")
 	errTransport      = errors.New("unable to complete the request to Irisbeat")
 )
@@ -69,34 +67,67 @@ type Monitor struct {
 	Timezone          string `json:"timezone"`
 }
 
+type endpoint[T any] struct {
+	path, label, missingMessage, invalidConfig string
+	missing                                    error
+	valid                                      func(T, string) bool
+}
+
+var monitors = endpoint[Monitor]{
+	path: "/api/v1/monitors", label: "Monitor", missingMessage: "Monitor not found", missing: ErrMonitorMissing,
+	invalidConfig: "Check the target, schedule, timing, and installation check floor",
+	valid: func(m Monitor, id string) bool {
+		return m.ID != "" && (id == "" || m.ID == id) && m.Name != "" &&
+			m.Kind != "" && m.Published != nil && (m.Kind != "http" || validHTTPMonitor(m))
+	},
+}
+
 func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Monitor, error) {
+	ep := monitors
+	ep.valid = func(m Monitor, id string) bool { return m.Kind == "http" && monitors.valid(m, id) }
+	return create(ctx, c, ep, fields)
+}
+
+func (c *Client) ReadMonitor(ctx context.Context, id string) (Monitor, error) {
+	monitor, _, err := request(ctx, c, monitors, http.MethodGet, id, "", nil, http.StatusOK)
+	return monitor, err
+}
+
+func (c *Client) UpdateMonitor(ctx context.Context, id string, fields map[string]any) (Monitor, error) {
+	return update(ctx, c, monitors, id, fields)
+}
+
+func (c *Client) DeleteMonitor(ctx context.Context, id string) error {
+	_, _, err := request(ctx, c, monitors, http.MethodDelete, id, "", nil, http.StatusNoContent)
+	return err
+}
+
+func create[T any](ctx context.Context, c *Client, ep endpoint[T], fields map[string]any) (T, error) {
+	var zero T
 	key := make([]byte, 16)
 	if _, err := rand.Read(key); err != nil {
-		return Monitor{}, errors.New("unable to generate a create idempotency key")
+		return zero, errors.New("unable to generate a create idempotency key")
 	}
 	body, err := json.Marshal(fields)
 	if err != nil {
-		return Monitor{}, errors.New("unable to encode the Monitor configuration")
+		return zero, fmt.Errorf("unable to encode the %s configuration", ep.label)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	idempotencyKey := hex.EncodeToString(key)
+	unknown := fmt.Errorf("create outcome is unknown. Check Irisbeat and import any existing %s by ID before trying again", ep.label)
 	uncertain := false
 	for attempt := 0; attempt < 3; attempt++ {
-		monitor, retry, err := c.request(ctx, http.MethodPost, "", idempotencyKey, body, http.StatusCreated)
-		if err == nil && monitor.Kind == "http" {
-			return monitor, nil
-		}
-		// This client creates HTTP Monitors. A mismatched success cannot confirm the write.
+		saved, retry, err := request(ctx, c, ep, http.MethodPost, "", idempotencyKey, body, http.StatusCreated)
 		if err == nil {
-			retry = true
+			return saved, nil
 		}
 		if !retry {
 			if uncertain {
-				return Monitor{}, errCreateUnknown
+				return zero, unknown
 			}
-			return Monitor{}, err
+			return zero, err
 		}
 		uncertain = true
 		if attempt < 2 {
@@ -105,43 +136,35 @@ func (c *Client) CreateMonitor(ctx context.Context, fields map[string]any) (Moni
 			case <-timer.C:
 			case <-ctx.Done():
 				timer.Stop()
-				return Monitor{}, errCreateUnknown
+				return zero, unknown
 			}
 		}
 	}
-	return Monitor{}, errCreateUnknown
+	return zero, unknown
 }
 
-func (c *Client) ReadMonitor(ctx context.Context, id string) (Monitor, error) {
-	monitor, _, err := c.request(ctx, http.MethodGet, id, "", nil, http.StatusOK)
-	return monitor, err
-}
-
-func (c *Client) UpdateMonitor(ctx context.Context, id string, fields map[string]any) (Monitor, error) {
+func update[T any](ctx context.Context, c *Client, ep endpoint[T], id string, fields map[string]any) (T, error) {
 	body, err := json.Marshal(fields)
 	if err != nil {
-		return Monitor{}, errors.New("unable to encode the Monitor configuration")
+		var zero T
+		return zero, fmt.Errorf("unable to encode the %s configuration", ep.label)
 	}
-	monitor, _, err := c.request(ctx, http.MethodPatch, id, "", body, http.StatusOK)
-	return monitor, err
+	saved, _, err := request(ctx, c, ep, http.MethodPatch, id, "", body, http.StatusOK)
+	return saved, err
 }
 
-func (c *Client) DeleteMonitor(ctx context.Context, id string) error {
-	_, _, err := c.request(ctx, http.MethodDelete, id, "", nil, http.StatusNoContent)
-	return err
-}
-
-func (c *Client) request(ctx context.Context, method, id, key string, body []byte, expectedStatus int) (Monitor, bool, error) {
-	endpoint := c.baseURL + monitorPath
+func request[T any](ctx context.Context, c *Client, ep endpoint[T], method, id, key string, body []byte, expectedStatus int) (T, bool, error) {
+	var zero T
+	target := c.baseURL + ep.path
 	if method != http.MethodPost {
 		if id == "" || id == "." || id == ".." {
-			return Monitor{}, false, errors.New("a valid Monitor ID is required")
+			return zero, false, fmt.Errorf("a valid %s ID is required", ep.label)
 		}
-		endpoint += "/" + url.PathEscape(id)
+		target += "/" + url.PathEscape(id)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
-		return Monitor{}, false, errUnexpected
+		return zero, false, errUnexpected
 	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	if body != nil {
@@ -154,25 +177,23 @@ func (c *Client) request(ctx context.Context, method, id, key string, body []byt
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Monitor{}, true, errTransport
+		return zero, true, errTransport
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != expectedStatus {
-		err := responseError(resp, id != "")
+		err := responseError(resp, id != "", ep)
 		retry := resp.StatusCode >= 500 || resp.StatusCode == 408 || resp.StatusCode == 425 ||
 			resp.StatusCode == 429 || (resp.StatusCode >= 200 && resp.StatusCode < 300)
-		return Monitor{}, retry, err
+		return zero, retry, err
 	}
 	if expectedStatus == http.StatusNoContent {
-		return Monitor{}, false, nil
+		return zero, false, nil
 	}
-	var monitor Monitor
-	if !decode(resp.Body, &monitor) || monitor.ID == "" || (id != "" && monitor.ID != id) ||
-		monitor.Name == "" || monitor.Kind == "" || monitor.Published == nil ||
-		(monitor.Kind == "http" && !validHTTPMonitor(monitor)) {
-		return Monitor{}, true, errUnexpected
+	var saved T
+	if !decode(resp.Body, &saved) || !ep.valid(saved, id) {
+		return zero, true, errUnexpected
 	}
-	return monitor, false, nil
+	return saved, false, nil
 }
 
 func validHTTPMonitor(m Monitor) bool {
@@ -187,14 +208,14 @@ func decode(body io.Reader, value any) bool {
 	return err == nil && len(data) <= maxResponse && json.Unmarshal(data, value) == nil
 }
 
-func responseError(resp *http.Response, resource bool) error {
+func responseError[T any](resp *http.Response, resource bool, ep endpoint[T]) error {
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
 		return errors.New("Irisbeat rejected the API key as invalid, expired, or revoked")
 	case http.StatusForbidden:
 		return errors.New("the API key has insufficient permission. Use an Irisbeat Write API key")
 	case http.StatusBadRequest:
-		return errors.New("Irisbeat rejected the Monitor configuration. Check the target, schedule, timing, and installation check floor")
+		return fmt.Errorf("Irisbeat rejected the %s configuration. %s", ep.label, ep.invalidConfig)
 	case http.StatusConflict:
 		return errors.New("Irisbeat reported a conflict. Check the installation before trying again")
 	case http.StatusNotFound:
@@ -202,8 +223,8 @@ func responseError(resp *http.Response, resource bool) error {
 		var payload struct {
 			Error string `json:"error"`
 		}
-		if resource && mediaType == "application/json" && decode(resp.Body, &payload) && payload.Error == "Monitor not found" {
-			return ErrMonitorMissing
+		if resource && mediaType == "application/json" && decode(resp.Body, &payload) && payload.Error == ep.missingMessage {
+			return ep.missing
 		}
 	}
 	return fmt.Errorf("Irisbeat request failed (HTTP %d)", resp.StatusCode)

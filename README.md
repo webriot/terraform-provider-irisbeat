@@ -1,6 +1,6 @@
 # Irisbeat provider
 
-Manage HTTP Monitors on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 Monitor API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/monitor-api-v1.md).
+Manage HTTP Monitors and webhook Notification destinations on a self-hosted Irisbeat installation with Terraform or OpenTofu. The provider uses the [Irisbeat v1 automation API](https://github.com/Webriot/irisbeat/blob/v0.5.0/docs/api-v1.md).
 
 ## Run a local build
 
@@ -45,9 +45,27 @@ Irisbeat supplies omitted timing on create and enforces the installation's check
 
 To adopt a Monitor, declare its matching saved configuration and run `terraform import irisbeat_monitor.website <monitor-id>` or `tofu import irisbeat_monitor.website <monitor-id>` using its ID from the same installation. If an interrupted create leaves the outcome unknown, check Irisbeat and import any existing Monitor before attempting another create.
 
+## Manage a webhook Notification destination
+
+```hcl
+variable "alert_webhook_url" {
+  type      = string
+  sensitive = true
+}
+
+resource "irisbeat_notification_destination" "alerts" {
+  channel     = "webhook"
+  webhook_url = var.alert_webhook_url
+}
+```
+
+Irisbeat generates a name when you omit `name`. Set `name` to rename the destination in place. Changing the saved webhook URL replaces the destination. Deleting the old destination clears all its Monitor assignments. Irisbeat normalizes recognized Discord webhook URLs to use the `/slack` suffix.
+
+Run `terraform import irisbeat_notification_destination.alerts <destination-id>` or `tofu import irisbeat_notification_destination.alerts <destination-id>` to adopt an existing webhook. The URL is sensitive in routine CLI output and is stored in plan and state files. If a create ends with an unknown outcome, check Irisbeat and import any existing destination before attempting another create.
+
 ## Verify
 
-`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete a Monitor.
+`go test ./...` runs the deterministic HTTP tests. To run CLI acceptance, use a disposable Irisbeat v0.5.0 installation with `MIN_CHECK_INTERVAL_SECONDS=120`. Inject its Write API key as `IRISBEAT_TEST_API_KEY` and the installation secret for independent Operator edits as `IRISBEAT_TEST_INSTALLATION_SECRET`. The tests create and delete Monitors and webhook Notification destinations.
 
 ```sh
 export IRISBEAT_TEST_BASE_URL=http://127.0.0.1:8787

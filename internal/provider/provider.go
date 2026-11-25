@@ -67,7 +67,10 @@ func (irisbeatProvider) Configure(ctx context.Context, req provider.ConfigureReq
 }
 
 func (irisbeatProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{func() resource.Resource { return &monitorResource{} }}
+	return []func() resource.Resource{
+		func() resource.Resource { return &monitorResource{} },
+		func() resource.Resource { return &destinationResource{} },
+	}
 }
 
 func (irisbeatProvider) DataSources(context.Context) []func() datasource.DataSource { return nil }
