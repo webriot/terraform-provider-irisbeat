@@ -188,13 +188,14 @@ resource "irisbeat_monitor" "test" {
 }
 `, destinationID, destinationID, assignments))
 	}
-	for _, assignments := range []string{
-		"terraform_data.input.output.ids",
-		fmt.Sprintf("[%q, terraform_data.input.output.id]", destinationID),
+	for _, tc := range []struct{ assignments, diagnostic string }{
+		{fmt.Sprintf("[%q, null]", destinationID), "Null destination ID"},
+		{"terraform_data.input.output.ids", "Monitor replacement requires a known value"},
+		{fmt.Sprintf("[%q, terraform_data.input.output.id]", destinationID), "Monitor replacement requires a known value"},
 	} {
-		config(assignments)
+		config(tc.assignments)
 		out := w.run(1, "plan", "-no-color")
-		if !strings.Contains(out, "Monitor replacement requires a known value") || !strings.Contains(out, "destination_ids") {
+		if !strings.Contains(out, tc.diagnostic) || !strings.Contains(out, "destination_ids") {
 			t.Fatalf("expected replacement diagnostic for destination_ids\n%s", out)
 		}
 		if got := installationRequest(t, http.MethodGet, endpoint, key, "", http.StatusOK); !reflect.DeepEqual(got, saved) {

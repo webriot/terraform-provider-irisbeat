@@ -104,6 +104,12 @@ func configured(value attr.Value) bool {
 }
 
 func validateMonitorConfig(config monitorModel, diags *diag.Diagnostics) {
+	for _, id := range config.DestinationIDs.Elements() {
+		if id.IsNull() {
+			diags.AddAttributeError(path.Root("destination_ids"), "Null destination ID", "Every member of destination_ids must be a destination ID.")
+			break
+		}
+	}
 	kind := config.Kind.ValueString()
 	switch kind {
 	case "http":
